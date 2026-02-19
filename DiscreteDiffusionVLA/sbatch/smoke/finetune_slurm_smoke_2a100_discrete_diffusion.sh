@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=REPLACE_ME
+#SBATCH --account=p32222
 #SBATCH --partition=gengpu              # GPU partition (48 h max)
 #SBATCH --gres=gpu:a100:2               # 2×A100 GPUs
 #SBATCH --nodes=1

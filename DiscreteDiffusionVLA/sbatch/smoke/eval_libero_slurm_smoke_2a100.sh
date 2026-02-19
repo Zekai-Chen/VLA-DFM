@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=REPLACE_ME
+#SBATCH --account=p32222
 #SBATCH --partition=gengpu
 #SBATCH --gres=gpu:a100:2
 #SBATCH --nodes=1
