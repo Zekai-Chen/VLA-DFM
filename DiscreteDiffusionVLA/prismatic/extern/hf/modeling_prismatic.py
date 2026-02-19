@@ -731,6 +731,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_stats = None
         dfm_action_token_count = None
 
+        # Resolve DFM defaults
+        dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
+        dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
+
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
             assert input_ids.shape[0] == 1, "Generation is only currently supported for batch size of 1!"
@@ -767,10 +771,6 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-
-        # Resolve DFM defaults
-        dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
-        dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
 
         # === Handle Multimodal Forward ===
         elif (input_ids.shape[0] == pixel_values.shape[0]) or (inputs_embeds.shape[0] == pixel_values.shape[0]):
