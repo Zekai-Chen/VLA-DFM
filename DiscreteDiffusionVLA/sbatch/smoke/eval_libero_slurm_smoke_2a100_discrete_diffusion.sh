@@ -13,10 +13,15 @@ set -euo pipefail
 
 # --- Environment (cluster-standard) ---
 module load python-miniconda3
-if command -v conda >/dev/null 2>&1; then
-  eval "$(conda shell.bash hook)"
-  conda activate ddopenvla
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
+VENV_PATH=${VENV_PATH:-${REPO_ROOT}/.venv}
+if [[ ! -d "${VENV_PATH}" ]]; then
+  echo "Venv not found at ${VENV_PATH}. Run scripts/uv_setup_linux_cuda.sh first." >&2
+  exit 1
 fi
+# shellcheck disable=SC1091
+source "${VENV_PATH}/bin/activate"
 
 module load gcc/12.4.0-gcc-8.5.0 && module load cuda/12.4.0-gcc-12.4.0
 module load git
