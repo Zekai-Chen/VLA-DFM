@@ -55,7 +55,7 @@ else
 fi
 
 # --- Base path + logging ---
-BASE_DIR="/scratch/ywn1043/finetune"
+BASE_DIR="/scratch/ywn1043/VLA-DFM"
 LOG_DIR="${BASE_DIR}/logs/discrete_diffusion_libero_spatial/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 

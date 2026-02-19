@@ -37,7 +37,7 @@ nvcc --version || true
 python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
 
 # --- Base path + logging ---
-BASE_DIR="/scratch/ywn1043/finetune"
+BASE_DIR="/scratch/ywn1043/VLA-DFM"
 LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 

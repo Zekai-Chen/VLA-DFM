@@ -13,6 +13,7 @@ git clone <YOUR_REPO_URL>
 cd /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA
 ```
 
+
 ## 2) Download assets to a base dir
 Example base path: `~/Downloads`
 
@@ -23,9 +24,18 @@ cd /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA
 /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/download_assets.sh ~/Downloads
 ```
 
+On Slurm run the following:
+```
+module load git-lfs && ./download_assets.sh /scratch/ywn1043/VLA-DFM
+```
 Optional: include finetuned checkpoints
 ```bash
 DOWNLOAD_FINETUNED=1 /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/download_assets.sh ~/Downloads
+```
+
+On Slurm:
+```
+module load git-lfs && DOWNLOAD_FINETUNED=1 ./download_assets.sh /scratch/ywn1043/VLA-DFM
 ```
 
 If you need a Hugging Face token:
@@ -34,7 +44,7 @@ HF_TOKEN=your_token_here /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/download_as
 ```
 
 ## 3) Update SLURM scripts to your base dir
-Default base dir inside scripts is `/scratch/ywn1043/finetune`.
+Default base dir inside scripts is `/scratch/ywn1043/VLA-DFM`.
 Edit these files if you want to use `~/Downloads` (or another path):
 - `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/sbatch/finetune_slurm.sh`
 - `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/sbatch/eval_libero_slurm.sh`

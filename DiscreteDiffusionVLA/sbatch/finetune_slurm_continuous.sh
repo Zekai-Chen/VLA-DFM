@@ -40,7 +40,7 @@ export WANDB_CACHE_DIR=/projects/p32222/.cache
 export WANDB_NAME="openvla_ft_${SLURM_JOBID:-local}"
 
 # --- Job params (adjust paths if needed) ---
-BASE_DIR="/scratch/ywn1043/finetune"
+BASE_DIR="/scratch/ywn1043/VLA-DFM"
 VLA_PATH="${BASE_DIR}/models/openvla-7b"
 DATA_ROOT="${BASE_DIR}/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
