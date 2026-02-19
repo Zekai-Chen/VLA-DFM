@@ -22,9 +22,7 @@ source "${VENV_DIR}/bin/activate"
 if [ ! -f "uv.lock" ]; then
   echo "uv.lock not found. Generating for linux + CUDA (${CUDA_WHL})..."
   uv lock \
-    --python-platform linux \
-    --python-version "${PYTHON_VERSION}" \
-    --implementation cp \
+    --python "${PYTHON_VERSION}" \
     --extra-index-url "${UV_EXTRA_INDEX_URL}"
 fi
 
