@@ -22,6 +22,9 @@ from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
 from prismatic.discrete_flow import (
+    dfm_decode,
+    kappa,
+    kappa_dot,
     mask_schedule,
     parallel_decode,
 )
@@ -283,6 +286,9 @@ class PrismaticCausalLMOutputWithPast(ModelOutput):
     # Additions for Discrete Diffusion
     labels: Optional[torch.LongTensor] = None
 
+    # Additions for DFM logging
+    dfm_stats: Optional[Dict[str, torch.FloatTensor]] = None
+
 
 class PrismaticPreTrainedModel(PreTrainedModel):
     config_class: PretrainedConfig = PrismaticConfig
@@ -363,7 +369,11 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # self.language_model.resize_token_embeddings(config.text_config.vocab_size)
 
         self.use_discrete_diffusion = config.use_discrete_diffusion
+        self.use_discrete_flow_matching = getattr(config, "use_discrete_flow_matching", False)
         self.mask_token_id = config.mask_token_id
+
+        if self.use_discrete_diffusion and self.use_discrete_flow_matching:
+            raise ValueError("Cannot enable both discrete diffusion and discrete flow matching.")
 
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = config.pad_token_id
@@ -620,6 +630,61 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask
 
+    def apply_mask_flow_matching(
+        self,
+        input_ids: torch.LongTensor,                 # (B, L)
+        input_embeddings: torch.Tensor,              # (B, L, D)
+        labels: torch.LongTensor,                    # (B, L), target input_ids (has -100)
+        loss_mask_full: torch.BoolTensor,            # (B, L), True indicates maskable positions
+        mask_token_id: int,
+        schedule: str = "cosine",
+        time_eps: float = 1e-3,
+        t_min: float = 0.0,
+        t_max: float = 1.0,
+    ):
+        """
+        Apply mask-only corruption following a DFM mixture path.
+        Returns masked inputs/labels plus loss mask and kappa stats.
+        """
+        B, L = input_ids.shape
+        device = input_ids.device
+
+        total_unknown = loss_mask_full.float().sum(dim=1)  # (B,)
+
+        # Sample time t in [t_min, t_max], clamped to (eps, 1-eps)
+        t_low = max(t_min, time_eps)
+        t_high = min(t_max, 1.0 - time_eps)
+        if t_high <= t_low:
+            raise ValueError("Invalid DFM time range after applying eps clamp.")
+        t = torch.rand(B, device=device) * (t_high - t_low) + t_low
+        kappa_t = kappa(t, schedule=schedule)
+        kdot_t = kappa_dot(t, schedule=schedule)
+
+        mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
+        num_mask = torch.clamp((total_unknown * mask_ratio).round(), min=1).long()
+
+        # Random scores for masking selection
+        vals = torch.rand(B, L, device=device)
+        large = float("inf")
+        vals = torch.where(loss_mask_full, vals, vals + large)
+        perm = vals.argsort(dim=1)
+        ranks = perm.argsort(dim=1)
+        masked_mask = ranks < num_mask[:, None]
+
+        ignore_labels = torch.full_like(labels, fill_value=IGNORE_INDEX, dtype=labels.dtype, device=device)
+        masked_labels = torch.where(masked_mask, labels, ignore_labels)
+
+        masked_input_ids = torch.where(masked_mask, mask_token_id, input_ids)
+
+        masked_input_embeddings = input_embeddings.clone()
+        mask_emb = self.get_input_embeddings()(torch.tensor([mask_token_id], device=device))
+        mask_emb = mask_emb.view(1, 1, -1).expand(B, L, -1)
+        masked_input_embeddings = torch.where(masked_mask.unsqueeze(-1), mask_emb, masked_input_embeddings)
+
+        loss_mask = masked_mask.float()
+
+        return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask, kappa_t, kdot_t
+
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
         self,
@@ -640,6 +705,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         noisy_action_projector=None,
         diffusion_timestep_embeddings=None,
         use_film: bool = False,
+        dfm_schedule: Optional[str] = None,
+        dfm_time_eps: float = 1e-3,
+        dfm_t_min: float = 0.0,
+        dfm_t_max: float = 1.0,
+        dfm_loss_mode: Optional[str] = None,
+        dfm_weight_clip: float = 20.0,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -654,6 +725,11 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         # Instantiate Placeholder for Projector Features
         projected_patch_embeddings = None
+        dfm_loss_mask = None
+        dfm_weight = None
+        multimodal_labels = None
+        dfm_stats = None
+        dfm_action_token_count = None
 
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
@@ -692,6 +768,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 return_dict=return_dict,
             )
 
+        # Resolve DFM defaults
+        dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
+        dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
+
         # === Handle Multimodal Forward ===
         elif (input_ids.shape[0] == pixel_values.shape[0]) or (inputs_embeds.shape[0] == pixel_values.shape[0]):
             assert past_key_values is None, "Unexpected key `past_key_values` provided during multimodal forward!"
@@ -723,6 +803,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 )
 
             # Process action embeddings
+            dfm_loss_mask = None
+            dfm_weight = None
+
             if noisy_actions is not None:
                 # Get mask corresponding to all action tokens
                 all_actions_mask = self._process_action_masks(labels)
@@ -754,6 +837,30 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
                 # Set labels to EOS_TOKEN in eos_pos
                 labels[torch.arange(labels.shape[0]), eos_pos] = STOP_INDEX
+
+            elif self.use_discrete_flow_matching:
+                loss_mask_full = all_actions_mask
+                dfm_action_token_count = loss_mask_full.sum(dim=1)
+                (
+                    input_ids,
+                    input_embeddings,
+                    labels,
+                    dfm_loss_mask,
+                    kappa_t,
+                    kdot_t,
+                ) = self.apply_mask_flow_matching(
+                    input_ids=input_ids,
+                    input_embeddings=input_embeddings,
+                    labels=labels,
+                    loss_mask_full=loss_mask_full,
+                    mask_token_id=self.mask_token_id,
+                    schedule=dfm_schedule,
+                    time_eps=dfm_time_eps,
+                    t_min=dfm_t_min,
+                    t_max=dfm_t_max,
+                )
+                denom = (1.0 - kappa_t).clamp(min=1e-8)
+                dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)
 
             else:
                 # Replace the embeddings of the action tokens with zeros
@@ -806,14 +913,61 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
             return language_model_output
 
+        # Override loss for DFM if applicable
+        lm_loss = language_model_output.loss
+        if self.use_discrete_flow_matching and (dfm_loss_mask is not None):
+            logits = language_model_output.logits
+            vocab_size = logits.shape[-1]
+            # Compute per-token CE loss over multimodal labels
+            token_losses = torch.nn.functional.cross_entropy(
+                logits.view(-1, vocab_size),
+                multimodal_labels.view(-1),
+                reduction="none",
+                ignore_index=IGNORE_INDEX,
+            ).view(multimodal_labels.shape)
+
+            # Align loss mask with multimodal sequence (insert patch positions)
+            patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
+            if patch_len > 0:
+                patch_mask = torch.zeros(
+                    (dfm_loss_mask.shape[0], patch_len), device=dfm_loss_mask.device, dtype=dfm_loss_mask.dtype
+                )
+                multimodal_loss_mask = torch.cat([dfm_loss_mask[:, :1], patch_mask, dfm_loss_mask[:, 1:]], dim=1)
+            else:
+                multimodal_loss_mask = dfm_loss_mask
+
+            if dfm_loss_mode == "masked_ce":
+                weight = torch.ones_like(multimodal_loss_mask)
+            else:
+                weight = dfm_weight.view(-1, 1).expand_as(multimodal_loss_mask)
+
+            masked_loss = token_losses * multimodal_loss_mask * weight
+            denom = (multimodal_loss_mask * weight).sum().clamp(min=1.0)
+            lm_loss = masked_loss.sum() / denom
+
+            # DFM stats for logging
+            with torch.no_grad():
+                if dfm_action_token_count is None:
+                    mask_frac = multimodal_loss_mask.sum(dim=1) / multimodal_loss_mask.shape[1]
+                else:
+                    mask_frac = dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
+                dfm_stats = {
+                    "kappa_mean": kappa_t.mean().detach(),
+                    "mask_frac_mean": mask_frac.mean().detach(),
+                    "w_mean": dfm_weight.mean().detach(),
+                    "frac_w_clipped": (dfm_weight >= dfm_weight_clip).float().mean().detach(),
+                    "num_supervised_tokens": dfm_loss_mask.sum().detach(),
+                }
+
         return PrismaticCausalLMOutputWithPast(
-            loss=language_model_output.loss,
+            loss=lm_loss,
             logits=language_model_output.logits,
             past_key_values=language_model_output.past_key_values,
             hidden_states=language_model_output.hidden_states,
             attentions=language_model_output.attentions,
             projector_features=projected_patch_embeddings,
             labels=labels if labels is not None else None,
+            dfm_stats=dfm_stats,
         )
 
     # === GenerationMixin Methods ===
@@ -1191,6 +1345,139 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         return normalized_actions, actions_hidden_states
 
+    def _discrete_flow_matching_prediction(
+        self,
+        input_embeddings,
+        all_actions_mask,
+        projected_patch_embeddings,
+        attention_mask,
+        labels,
+        NUM_PATCHES,
+        NUM_PROMPT_TOKENS,
+        action_head=None,
+        input_ids=None,
+        dfm_num_steps: int = 12,
+        dfm_schedule: str = "cosine",
+        dfm_temperature: float = 1.0,
+        dfm_temperature_anneal: str = "none",
+        dfm_adaptive_step: bool = True,
+        dfm_step_min: float = 1e-4,
+        dfm_step_max: float = 0.2,
+        dfm_time_eps: float = 1e-3,
+        dfm_early_exit: bool = True,
+        dfm_early_exit_frac: float = 0.0,
+        dfm_corrector: bool = False,
+        dfm_corrector_iters: int = 1,
+        dfm_corrector_remask_frac: float = 0.1,
+        dfm_clamp_mask: bool = False,
+        dfm_clamp_values: Optional[torch.LongTensor] = None,
+    ):
+        \"\"\"CTMC discrete flow matching prediction.\"\"\"
+        assert input_ids is not None, "Input IDs must be provided for DFM prediction!"
+
+        if action_head is not None:
+            # Continuous action heads not supported in DFM prediction
+            pass
+        else:
+
+            def tokens_to_logits(suffix_seq: torch.LongTensor) -> torch.Tensor:
+                prefix = masked_input_ids[:, : 1 + NUM_PROMPT_TOKENS]
+                suffix = masked_input_ids[:, 1 + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK :]
+                full_seqs = torch.cat([prefix, suffix_seq, suffix], dim=1)
+
+                input_embeddings = self.get_input_embeddings()(full_seqs)
+
+                multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
+                    input_embeddings, projected_patch_embeddings, attention_mask
+                )
+
+                language_model_output = self.language_model(
+                    input_ids=None,
+                    attention_mask=multimodal_attention_mask,
+                    position_ids=None,
+                    past_key_values=None,
+                    inputs_embeds=multimodal_embeddings,
+                    labels=None,
+                    use_cache=None,
+                    output_attentions=False,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+
+                logits = language_model_output.logits
+
+                full_logits = logits[
+                    :,
+                    NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
+                    : self.vocab_size,
+                ]
+
+                last_hidden_states = language_model_output.hidden_states[-1]
+                actions_hidden_states = last_hidden_states[
+                    :,
+                    NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
+                    :,
+                ]
+
+                return full_logits, actions_hidden_states
+
+            mask_token_id = self.mask_token_id
+            masked_input_ids = torch.where(
+                all_actions_mask, torch.tensor(mask_token_id, device=input_ids.device), input_ids
+            )
+
+            cur_seqs = masked_input_ids[
+                :, 1 + NUM_PROMPT_TOKENS : 1 + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK
+            ]
+
+            clamp_values = None
+            if dfm_clamp_values is not None:
+                clamp_values = dfm_clamp_values.to(cur_seqs.device)
+                if clamp_values.dim() == 1:
+                    clamp_values = clamp_values.unsqueeze(0).expand(cur_seqs.size(0), -1)
+                if clamp_values.shape != cur_seqs.shape:
+                    raise ValueError(
+                        f"dfm_clamp_values must have shape {tuple(cur_seqs.shape)}, got {tuple(clamp_values.shape)}"
+                    )
+
+            clamp_mask = None
+            if isinstance(dfm_clamp_mask, torch.Tensor):
+                clamp_mask = dfm_clamp_mask.to(cur_seqs.device)
+            elif clamp_values is not None:
+                clamp_mask = clamp_values != mask_token_id
+            elif dfm_clamp_mask:
+                clamp_mask = cur_seqs != mask_token_id
+
+            final_ids, actions_hidden_states, dfm_stats = dfm_decode(
+                init_ids=cur_seqs,
+                tokens_to_logits=tokens_to_logits,
+                mask_token_id=mask_token_id,
+                num_steps=dfm_num_steps,
+                schedule=dfm_schedule,
+                temperature=dfm_temperature,
+                temperature_anneal=dfm_temperature_anneal,
+                adaptive_step=dfm_adaptive_step,
+                step_min=dfm_step_min,
+                step_max=dfm_step_max,
+                time_eps=dfm_time_eps,
+                early_exit=dfm_early_exit,
+                early_exit_frac=dfm_early_exit_frac,
+                corrector=dfm_corrector,
+                corrector_iters=dfm_corrector_iters,
+                corrector_remask_frac=dfm_corrector_remask_frac,
+                clamp_mask=clamp_mask,
+                clamp_values=clamp_values,
+            )
+            self.last_dfm_stats = dfm_stats
+
+            predicted_action_token_ids = final_ids.cpu().numpy()
+            discretized_actions = self.vocab_size - predicted_action_token_ids
+            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+            normalized_actions = self.bin_centers[discretized_actions]
+            normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+
+        return normalized_actions, actions_hidden_states
+
     def predict_action(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1201,6 +1488,22 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         noisy_action_projector=None,
         use_film: bool = False,
         use_discrete_diffusion: bool = False,
+        use_discrete_flow_matching: bool = False,
+        dfm_num_steps: int = 12,
+        dfm_schedule: str = "cosine",
+        dfm_temperature: float = 1.0,
+        dfm_temperature_anneal: str = "none",
+        dfm_adaptive_step: bool = True,
+        dfm_step_min: float = 1e-4,
+        dfm_step_max: float = 0.2,
+        dfm_time_eps: float = 1e-3,
+        dfm_early_exit: bool = True,
+        dfm_early_exit_frac: float = 0.0,
+        dfm_corrector: bool = False,
+        dfm_corrector_iters: int = 1,
+        dfm_corrector_remask_frac: float = 0.1,
+        dfm_clamp_mask: bool = False,
+        dfm_clamp_values: Optional[torch.LongTensor] = None,
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -1232,6 +1535,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Create fake labels tensor (needed for action mask)
         labels = input_ids.clone()
         labels[:] = IGNORE_INDEX
+
+        if use_discrete_diffusion and use_discrete_flow_matching:
+            raise ValueError("Cannot enable both discrete diffusion and discrete flow matching.")
 
         # Get number of tokens in prompt (excluding the start token)
         NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1  # Subtract action tokens and stop token
@@ -1274,6 +1580,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         if use_diffusion:
             assert use_discrete_diffusion is False, "Discrete diffusion has not been supported in this method!"
+            assert use_discrete_flow_matching is False, "DFM is not supported with diffusion action head!"
             # Sample random noise with shape equal to output action, used as the starting state for reverse diffusion
             noise = torch.randn(
                 size=(1, NUM_ACTIONS_CHUNK, ACTION_DIM), device=input_embeddings.device, dtype=input_embeddings.dtype
@@ -1293,7 +1600,34 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 noisy_action_projector,
             )
         else:
-            if use_discrete_diffusion:
+            if use_discrete_flow_matching:
+                normalized_actions, actions_hidden_states = self._discrete_flow_matching_prediction(
+                    input_embeddings,
+                    all_actions_mask,
+                    projected_patch_embeddings,
+                    attention_mask,
+                    labels,
+                    NUM_PATCHES,
+                    NUM_PROMPT_TOKENS,
+                    action_head,
+                    input_ids=input_ids,
+                    dfm_num_steps=dfm_num_steps,
+                    dfm_schedule=dfm_schedule,
+                    dfm_temperature=dfm_temperature,
+                    dfm_temperature_anneal=dfm_temperature_anneal,
+                    dfm_adaptive_step=dfm_adaptive_step,
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
+                    dfm_early_exit=dfm_early_exit,
+                    dfm_early_exit_frac=dfm_early_exit_frac,
+                    dfm_corrector=dfm_corrector,
+                    dfm_corrector_iters=dfm_corrector_iters,
+                    dfm_corrector_remask_frac=dfm_corrector_remask_frac,
+                    dfm_clamp_mask=dfm_clamp_mask,
+                    dfm_clamp_values=dfm_clamp_values,
+                )
+            elif use_discrete_diffusion:
                 normalized_actions, actions_hidden_states = self._discrete_diffusion_prediction(
                     input_embeddings,
                     all_actions_mask,

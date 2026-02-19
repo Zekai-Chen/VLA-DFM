@@ -86,6 +86,7 @@ class PrismaticConfig(PretrainedConfig):
         mask_token_id: int = 32001,
         use_mask_token: bool = False,
         use_discrete_diffusion: bool = False,
+        use_discrete_flow_matching: bool = False,
         pad_to_multiple_of: int = 64,
         output_projector_states: bool = False,
         **kwargs: str,
@@ -120,6 +121,7 @@ class PrismaticConfig(PretrainedConfig):
         self.mask_token_id, self.use_mask_token = mask_token_id, use_mask_token
 
         self.use_discrete_diffusion = use_discrete_diffusion
+        self.use_discrete_flow_matching = use_discrete_flow_matching
 
         # [IMPORTANT] HF Utilities actually look for a `text_config` field... we need to use that specific naming!
         self.text_config = (
@@ -144,6 +146,10 @@ class PrismaticConfig(PretrainedConfig):
     def set_dicrete_diffusion(self, use_discrete_diffusion: bool=True) -> None:
         """Set whether to use discrete diffusion."""
         self.use_discrete_diffusion = use_discrete_diffusion
+
+    def set_discrete_flow_matching(self, use_discrete_flow_matching: bool=True) -> None:
+        """Set whether to use discrete flow matching."""
+        self.use_discrete_flow_matching = use_discrete_flow_matching
 
 
 class OpenVLAConfig(PrismaticConfig):
