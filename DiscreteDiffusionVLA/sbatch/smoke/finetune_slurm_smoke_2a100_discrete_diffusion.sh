@@ -65,7 +65,7 @@ python -V || true
 nvcc --version || true
 python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
 
-export WANDB_CACHE_DIR=/projects/p32775/.cache
+export WANDB_CACHE_DIR=/projects/p32222/.cache
 export WANDB_MODE=offline
 export WANDB_DISABLED=true
 export WANDB_NAME="openvla_ft_smoke_${SLURM_JOBID:-local}"
