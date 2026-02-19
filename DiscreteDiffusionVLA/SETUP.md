@@ -1,6 +1,24 @@
 # Setup Instructions
 
-## Set Up Conda Environment
+## Set Up UV Environment (Recommended for Clusters)
+
+The easiest way to keep installs reproducible on Ubuntu/CUDA machines is to use `uv` with a lockfile.
+
+```bash
+# From the repo root
+./scripts/uv_setup_linux_cuda.sh
+
+# Optional overrides
+# PYTHON_VERSION=3.10 CUDA_WHL=cu121 VENV_DIR=.venv ./scripts/uv_setup_linux_cuda.sh
+# For CUDA 11.8, set CUDA_WHL=cu118
+```
+
+Notes:
+- The lockfile is platform-specific. Generate `uv.lock` on the same OS/arch as your target machine (Linux x86_64).
+- `uv` will use the PyTorch CUDA wheels via `https://download.pytorch.org/whl/<cuXXX>`.
+- If your cluster loads `cuda/12.4.0`, keep the default `CUDA_WHL=cu121` (recommended).
+
+## Set Up Conda Environment (Alternative)
 
 ```bash
 # Create and activate conda environment
