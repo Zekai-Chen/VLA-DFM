@@ -12,7 +12,7 @@ authors = [
 description = "Fine-Tuning Vision-Language-Action Models: Optimizing Speed and Success"
 version = "0.0.1"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 keywords = ["vision-language-actions models", "fine-tuning", "robot learning"]
 license = {file = "LICENSE"}
 classifiers = [
