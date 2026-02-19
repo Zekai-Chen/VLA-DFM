@@ -574,7 +574,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         # 3) 根据 schedule 计算 mask ratio、再算出每个样本要 mask 的 token 数
         #    mask_ratios: tensor (B,), 取值 in (0,1]
-        mask_ratios = mask_schedule.schedule(rand_time, total_unknown, method="cosine")  # [B]
+        mask_ratios = mask_schedule(rand_time, total_unknown, method="cosine")  # [B]
         #    num_mask: at least 1
         num_mask = torch.clamp((total_unknown * mask_ratios).round(), min=1).long()  # [B]
 
