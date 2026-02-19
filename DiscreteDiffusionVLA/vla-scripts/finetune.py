@@ -916,7 +916,18 @@ def finetune(cfg: FinetuneConfig) -> None:
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
     # Load the model configuration
-    model_config = AutoConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
+    try:
+        model_config = AutoConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
+    except AttributeError as exc:
+        # Some HF repos ship config modules without OpenVLAConfig; fall back to local class.
+        if "OpenVLAConfig" not in str(exc):
+            raise
+        logger.warning(
+            "OpenVLAConfig not found in remote configuration module; falling back to local OpenVLAConfig."
+        )
+        from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig as LocalOpenVLAConfig
+
+        model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
     if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
         processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
