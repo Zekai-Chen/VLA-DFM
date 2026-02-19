@@ -20,7 +20,7 @@ This is an implementation with basic logics of our discrete diffusion VLA on LIB
 
 ## Setup
 
-See [SETUP.md](SETUP.md) for instructions on setting up a UV (recommended) or conda environment.
+See [SETUP.md](SETUP.md) for instructions on setting up the conda environment.
 
 See [LIBERO.md](LIBERO.md) for fine-tuning/evaluating on LIBERO simulation benchmark task suites.
 

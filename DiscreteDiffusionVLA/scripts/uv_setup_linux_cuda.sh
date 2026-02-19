@@ -36,6 +36,9 @@ uv sync --frozen \
   --index "${UV_INDEX}" \
   --index-strategy "${UV_INDEX_STRATEGY}"
 
+# Pin PEFT + diffusers + hub + accelerate to compatible versions
+uv pip install "peft==0.11.1" "diffusers==0.24.0" "accelerate==0.23.0" "huggingface_hub==0.19.4"
+
 # Optional: install Flash Attention 2 for training
 uv pip install packaging ninja
 ninja --version; echo $?
