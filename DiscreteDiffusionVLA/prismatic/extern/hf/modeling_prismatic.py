@@ -1372,7 +1372,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         dfm_clamp_mask: bool = False,
         dfm_clamp_values: Optional[torch.LongTensor] = None,
     ):
-        \"\"\"CTMC discrete flow matching prediction.\"\"\"
+        """CTMC discrete flow matching prediction."""
         assert input_ids is not None, "Input IDs must be provided for DFM prediction!"
 
         if action_head is not None:
