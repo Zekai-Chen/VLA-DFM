@@ -107,6 +107,7 @@ def get_action(
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_discrete_diffusion: bool = False,
+    use_discrete_flow_matching: bool = False,
 ) -> Union[List[np.ndarray], np.ndarray]:
     """
     Query the model to get action predictions.
@@ -142,6 +143,7 @@ def get_action(
                 noisy_action_projector=noisy_action_projector,
                 use_film=use_film,
                 use_discrete_diffusion=use_discrete_diffusion,
+                use_discrete_flow_matching=use_discrete_flow_matching,
             )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")

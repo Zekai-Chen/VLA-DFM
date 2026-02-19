@@ -723,6 +723,7 @@ def get_vla_action(
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_discrete_diffusion: bool = False,
+    use_discrete_flow_matching: bool = False,
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -743,6 +744,25 @@ def get_vla_action(
         List[np.ndarray]: Predicted actions
     """
     with torch.inference_mode():
+        # Ensure mask token is available for discrete diffusion / DFM
+        if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
+            processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
+            if hasattr(vla, "config"):
+                vla.config.set_mask_token_id(processor.tokenizer.mask_token_id)
+            if hasattr(vla, "mask_token_id"):
+                vla.mask_token_id = processor.tokenizer.mask_token_id
+            if hasattr(vla, "config") and hasattr(vla.config, "use_mask_token"):
+                vla.config.use_mask_token = True
+        was_dfm_trained = getattr(vla.config, "use_discrete_flow_matching", False) if hasattr(vla, "config") else False
+        if use_discrete_flow_matching and hasattr(vla, "config") and hasattr(vla.config, "use_discrete_flow_matching"):
+            vla.config.use_discrete_flow_matching = True
+
+        # Compatibility warning if enabling DFM on a non-DFM checkpoint
+        if use_discrete_flow_matching and (not was_dfm_trained):
+            print(
+                "WARNING: DFM enabled but checkpoint config does not indicate DFM training. "
+                "Expect possible quality drop unless retrained."
+            )
 
         # Collect all input images
         all_images = [obs["full_image"]]
@@ -779,6 +799,17 @@ def get_vla_action(
             obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
             proprio = obs["state"]
 
+        # Prepare optional clamp values/mask
+        clamp_values = getattr(cfg, "dfm_clamp_values", None)
+        if clamp_values is not None and not torch.is_tensor(clamp_values):
+            try:
+                clamp_values = torch.tensor(clamp_values, dtype=torch.long)
+            except Exception:
+                clamp_values = None
+        clamp_mask = getattr(cfg, "dfm_clamp_mask", False)
+        if clamp_values is not None and isinstance(clamp_mask, bool) and not clamp_mask:
+            clamp_mask = True
+
         # Generate action
         if action_head is None:
             # Standard VLA output (single-image inputs, discrete actions)
@@ -792,6 +823,22 @@ def get_vla_action(
                 action_head=action_head,
                 use_film=use_film,
                 use_discrete_diffusion=use_discrete_diffusion,
+                use_discrete_flow_matching=use_discrete_flow_matching,
+                dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                dfm_clamp_mask=clamp_mask,
+                dfm_clamp_values=clamp_values,
                 )
         else:
             # Custom action head for continuous actions
@@ -805,6 +852,22 @@ def get_vla_action(
                 action_head=action_head,
                 use_film=use_film,
                 use_discrete_diffusion=use_discrete_diffusion,
+                use_discrete_flow_matching=use_discrete_flow_matching,
+                dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                dfm_clamp_mask=clamp_mask,
+                dfm_clamp_values=clamp_values,
             )
 
     # Return action chunk as list of actions

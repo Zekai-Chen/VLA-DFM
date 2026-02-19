@@ -94,6 +94,22 @@ class GenerateConfig:
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     use_discrete_diffusion: bool = False             # If True, uses discrete diffusion model for action generation
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
+    use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
+    dfm_num_steps: int = 12                          # Number of CTMC steps
+    dfm_schedule: str = "cosine"                     # Schedule for kappa(t)
+    dfm_temperature: float = 1.0                     # Sampling temperature
+    dfm_temperature_anneal: str = "none"             # none | linear
+    dfm_adaptive_step: bool = True                   # Adaptive step size for CTMC
+    dfm_step_min: float = 1e-4                       # Minimum step size
+    dfm_step_max: float = 0.2                        # Maximum step size
+    dfm_time_eps: float = 1e-3                       # Avoid t endpoints
+    dfm_early_exit: bool = True                      # Stop if no tokens change
+    dfm_early_exit_frac: float = 0.0                 # Stop if changed/total < frac
+    dfm_corrector: bool = False                      # Optional remask corrector
+    dfm_corrector_iters: int = 1                     # Corrector iterations
+    dfm_corrector_remask_frac: float = 0.1           # Remask fraction in corrector
+    dfm_clamp_mask: bool = False                     # Clamp non-mask tokens during CTMC
+    dfm_clamp_values: Optional[str] = None           # Optional clamp values spec/path
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -135,6 +151,12 @@ class GenerateConfig:
 def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
     assert cfg.pretrained_checkpoint is not None, "pretrained_checkpoint must not be None!"
+    assert not (cfg.use_discrete_diffusion and cfg.use_discrete_flow_matching), (
+        "Cannot enable both discrete diffusion and discrete flow matching!"
+    )
+    assert not (cfg.use_discrete_flow_matching and (cfg.use_l1_regression or cfg.use_diffusion)), (
+        "DFM is not compatible with continuous action heads (L1 regression or diffusion)."
+    )
 
     if "image_aug" in str(cfg.pretrained_checkpoint):
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
@@ -340,7 +362,21 @@ def run_episode(
                     noisy_action_projector=noisy_action_projector,
                     use_film=cfg.use_film,
                     use_discrete_diffusion=cfg.use_discrete_diffusion,
+                    use_discrete_flow_matching=cfg.use_discrete_flow_matching,
                 )
+                if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
+                    dfm_stats = model.last_dfm_stats or {}
+                    num_changed = dfm_stats.get("dfm_num_changed_tokens", [])
+                    num_changed_mean = float(sum(num_changed) / max(len(num_changed), 1)) if num_changed else 0.0
+                    wandb.log(
+                        {
+                            "DFM/NFE Realized": dfm_stats.get("dfm_nfe_realized", 0),
+                            "DFM/Early Exit Iter": dfm_stats.get("dfm_early_exit_iter", -1),
+                            "DFM/DT Safe Hits": dfm_stats.get("dfm_dt_safe_hits", 0),
+                            "DFM/DT Under Min": dfm_stats.get("dfm_dt_under_min", 0),
+                            "DFM/Num Changed Mean": num_changed_mean,
+                        }
+                    )
                 action_queue.extend(actions)
 
             # Get action from queue
