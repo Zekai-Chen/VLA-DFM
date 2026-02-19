@@ -12,14 +12,43 @@
 set -euo pipefail
 
 # --- Environment (cluster-standard) ---
-module load python-miniconda3
-if command -v conda >/dev/null 2>&1; then
-  eval "$(conda shell.bash hook)"
-  conda activate ddopenvla
-fi
-
 module load gcc/12.4.0-gcc-8.5.0 && module load cuda/12.4.0-gcc-12.4.0
 module load git
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+REPO_ROOT_DEFAULT=${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}
+REPO_ROOT=${REPO_ROOT:-${REPO_ROOT_DEFAULT}}
+
+# Resolve repo root (search upwards for expected scripts)
+if [ ! -f "${REPO_ROOT}/vla-scripts/finetune.py" ] && [ ! -f "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" ]; then
+  SEARCH_DIR="${REPO_ROOT}"
+  for _ in 1 2 3 4; do
+    SEARCH_DIR=$(dirname "${SEARCH_DIR}")
+    if [ -f "${SEARCH_DIR}/vla-scripts/finetune.py" ] || [ -f "${SEARCH_DIR}/experiments/robot/libero/run_libero_eval.py" ]; then
+      REPO_ROOT="${SEARCH_DIR}"
+      break
+    fi
+  done
+fi
+
+if [ ! -d "${REPO_ROOT}" ] || { [ ! -f "${REPO_ROOT}/vla-scripts/finetune.py" ] && [ ! -f "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" ]; }; then
+  echo "ERROR: Repo root not found or missing expected scripts at ${REPO_ROOT}" 1>&2
+  exit 1
+fi
+cd "${REPO_ROOT}"
+
+# Activate a virtualenv if available (robust check)
+VENV_ACTIVATE=${VENV_ACTIVATE:-"${REPO_ROOT}/.venv/bin/activate"}
+if [ ! -f "${VENV_ACTIVATE}" ] && [ -f "${REPO_ROOT}/.venv-ubuntu-nvidia/bin/activate" ]; then
+  VENV_ACTIVATE="${REPO_ROOT}/.venv-ubuntu-nvidia/bin/activate"
+fi
+if [ ! -f "${VENV_ACTIVATE}" ]; then
+  echo "ERROR: Virtualenv activate script not found at ${VENV_ACTIVATE}." 1>&2
+  ls -la "${REPO_ROOT}"
+  exit 1
+fi
+# shellcheck disable=SC1091
+source "${VENV_ACTIVATE}"
 
 # --- Basic diagnostics ---
 mkdir -p logs
@@ -69,7 +98,6 @@ DFM_WEIGHT_CLIP=20.0
 
 NPROC=${SLURM_GPUS_ON_NODE:-1}
 
-cd /Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA
 
 # --- Launch (PyTorch DDP) ---
 if [[ "${USE_DFM}" == "true" ]]; then
