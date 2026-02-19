@@ -12,7 +12,7 @@ authors = [
 description = "Fine-Tuning Vision-Language-Action Models: Optimizing Speed and Success"
 version = "0.0.1"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 keywords = ["vision-language-actions models", "fine-tuning", "robot learning"]
 license = {file = "LICENSE"}
 classifiers = [
@@ -23,6 +23,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3 :: Only",
@@ -65,6 +66,7 @@ dev = [
     "gpustat",
     "ipython",
     "pre-commit",
+    "pytest>=7.4.0",
     "ruff>=0.2.2",
 ]
 sagemaker = [
