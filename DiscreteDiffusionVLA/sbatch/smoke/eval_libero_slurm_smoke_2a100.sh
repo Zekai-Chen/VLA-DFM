@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:a100:2
 #SBATCH --nodes=1
 #SBATCH --mem=120G
-#SBATCH --time=02:00:00
+#SBATCH --time=47:00:00
 #SBATCH --job-name=openvla-eval-smoke
 #SBATCH --output=logs/openvla_eval_smoke_%j.out
 #SBATCH --error=logs/openvla_eval_smoke_%j.err

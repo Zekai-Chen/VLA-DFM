@@ -66,8 +66,8 @@ nvcc --version || true
 python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
 
 export WANDB_CACHE_DIR=/projects/p32222/.cache
-export WANDB_MODE=offline
-export WANDB_DISABLED=true
+export WANDB_MODE=online
+export WANDB_DISABLED=false
 export WANDB_NAME="openvla_ft_smoke_${SLURM_JOBID:-local}"
 
 # --- Job params (adjust paths if needed) ---
@@ -129,8 +129,8 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_t_min ${DFM_T_MIN} \
     --dfm_t_max ${DFM_T_MAX} \
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
-    --wandb_entity "offline" \
-    --wandb_project "offline" \
+    --wandb_entity "a10v-1" \
+    --wandb_project "VLA-DFM" \
     --run_id_note "smoke-2xA100--$(date +%Y%m%d_%H%M)" \
     | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 else
@@ -156,8 +156,8 @@ else
     --image_aug False \
     --lora_rank ${LORA_RANK} \
     --torch_dtype "${TORCH_DTYPE}" \
-    --wandb_entity "offline" \
-    --wandb_project "offline" \
+    --wandb_entity "a10v-1" \
+    --wandb_project "VLA-DFM" \
     --run_id_note "smoke-2xA100--$(date +%Y%m%d_%H%M)" \
     | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 fi
