@@ -83,9 +83,11 @@ class FinetuneConfig:
     use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
 
     use_discrete_diffusion: bool = True             # If True, uses discrete diffusion (instead of continuous) for action generation
+    use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching for action generation
 
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
+    torch_dtype: str = "bfloat16"                    # bfloat16 | float16 | float32
     learning_rate: float = 5e-4                      # Learning rate
     lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x
@@ -117,7 +119,27 @@ class FinetuneConfig:
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
     wandb_log_freq: int = 10                         # WandB logging frequency in steps
 
+    # DFM configuration
+    dfm_schedule: str = "cosine"                     # Schedule for kappa(t)
+    dfm_time_eps: float = 1e-3                       # Avoid t at endpoints
+    dfm_t_min: float = 0.0                           # Min t for sampling
+    dfm_t_max: float = 1.0                           # Max t for sampling (capped by 1 - dfm_time_eps)
+    dfm_loss_mode: str = "generalized_kl"            # generalized_kl | masked_ce
+    dfm_weight_clip: float = 20.0                    # Clamp kappa_dot/(1-kappa)
+
     # fmt: on
+
+
+def resolve_torch_dtype(dtype_str: str) -> torch.dtype:
+    """Resolve a string dtype name to a torch dtype."""
+    normalized = dtype_str.lower()
+    if normalized in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if normalized in ("fp16", "float16", "half"):
+        return torch.float16
+    if normalized in ("fp32", "float32"):
+        return torch.float32
+    raise ValueError(f"Unsupported torch_dtype: {dtype_str}")
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -205,6 +227,7 @@ def wrap_ddp(module: nn.Module, device_id: int, find_unused: bool = False) -> DD
     Args:
         module (nn.Module): PyTorch module.
         device_id (str): Device ID.
+        torch_dtype (torch.dtype): Dtype used for model inputs and autocast.
         find_unused (bool): Whether to detect parameters without gradients in distributed training.
 
     Returns:
@@ -234,7 +257,7 @@ def init_module(
     cfg: FinetuneConfig,
     device_id: int,
     module_args: dict,
-    to_bf16: bool = False,
+    to_dtype: Optional[torch.dtype] = None,
     find_unused_params: bool = False,
 ) -> DDP:
     """
@@ -246,7 +269,7 @@ def init_module(
         cfg (FinetuneConfig): Training configuration.
         device_id (str): Device ID.
         module_args (dict): Args for initializing the module.
-        to_bf16 (bool): Whether to convert to torch.bfloat16 data type.
+        to_dtype (torch.dtype): Optional dtype to cast module parameters.
         find_unused_params (bool): Whether to detect parameters without gradients in distributed training.
 
     Returns:
@@ -259,8 +282,8 @@ def init_module(
         state_dict = load_checkpoint(module_name, cfg.vla_path, cfg.resume_step)
         module.load_state_dict(state_dict)
 
-    if to_bf16:
-        module = module.to(torch.bfloat16)
+    if to_dtype is not None:
+        module = module.to(to_dtype)
     module = module.to(device_id)
 
     return wrap_ddp(module, device_id, find_unused_params)
@@ -274,6 +297,7 @@ def run_forward_pass(
     batch,
     action_tokenizer,
     device_id,
+    torch_dtype: torch.dtype,
     use_l1_regression,
     use_diffusion,
     use_proprio,
@@ -282,6 +306,13 @@ def run_forward_pass(
     compute_diffusion_l1=False,
     num_diffusion_steps_train=None,
     use_discrete_diffusion=False,
+    use_discrete_flow_matching=False,
+    dfm_schedule: str = "cosine",
+    dfm_time_eps: float = 1e-3,
+    dfm_t_min: float = 0.0,
+    dfm_t_max: float = 1.0,
+    dfm_loss_mode: str = "generalized_kl",
+    dfm_weight_clip: float = 20.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute model forward pass and metrics for both training and validation.
@@ -311,7 +342,7 @@ def run_forward_pass(
     metrics = {}
 
     # Get ground-truth action labels
-    ground_truth_actions = batch["actions"].to(device_id).to(torch.bfloat16)
+    ground_truth_actions = batch["actions"].to(device_id).to(torch_dtype)
 
     # [Only for diffusion] Sample noisy actions used as input for noise predictor network
     if use_diffusion:
@@ -325,11 +356,12 @@ def run_forward_pass(
         noise, noisy_actions, diffusion_timestep_embeddings = None, None, None
 
     # VLA forward pass
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    autocast_dtype = torch_dtype if torch_dtype in (torch.float16, torch.bfloat16) else None
+    with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
         output: CausalLMOutputWithPast = vla(
             input_ids=batch["input_ids"].to(device_id),
             attention_mask=batch["attention_mask"].to(device_id),
-            pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
+            pixel_values=batch["pixel_values"].to(torch_dtype).to(device_id),
             labels=batch["labels"],
             output_hidden_states=True,
             proprio=batch["proprio"] if use_proprio else None,
@@ -338,11 +370,17 @@ def run_forward_pass(
             noisy_action_projector=noisy_action_projector if use_diffusion else None,
             diffusion_timestep_embeddings=diffusion_timestep_embeddings if use_diffusion else None,
             use_film=use_film,
+            dfm_schedule=dfm_schedule,
+            dfm_time_eps=dfm_time_eps,
+            dfm_t_min=dfm_t_min,
+            dfm_t_max=dfm_t_max,
+            dfm_loss_mode=dfm_loss_mode,
+            dfm_weight_clip=dfm_weight_clip,
         )
 
     # Get action masks needed for logging
     ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-    if use_discrete_diffusion:
+    if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
     current_action_mask = get_current_action_mask(ground_truth_token_ids)
@@ -373,6 +411,17 @@ def run_forward_pass(
                 "next_actions_l1_loss": next_actions_l1_loss.item(),
             }
         )
+        if use_discrete_flow_matching and getattr(output, "dfm_stats", None) is not None:
+            dfm_stats = output.dfm_stats
+            metrics.update(
+                {
+                    "dfm_kappa_mean": dfm_stats["kappa_mean"].item(),
+                    "dfm_mask_frac_mean": dfm_stats["mask_frac_mean"].item(),
+                    "dfm_w_mean": dfm_stats["w_mean"].item(),
+                    "dfm_frac_w_clipped": dfm_stats["frac_w_clipped"].item(),
+                    "dfm_num_supervised_tokens": dfm_stats["num_supervised_tokens"].item(),
+                }
+            )
     # Compute metrics for continuous action representations (L1 regression | diffusion)
     else:
         # Get last layer hidden states
@@ -391,7 +440,7 @@ def run_forward_pass(
         actions_hidden_states = (
             text_hidden_states[current_action_mask | next_actions_mask]
             .reshape(batch_size, NUM_ACTIONS_CHUNK * ACTION_DIM, -1)
-            .to(torch.bfloat16)
+            .to(torch_dtype)
         )  # (B, act_chunk_len, D)
 
         if use_l1_regression:
@@ -424,6 +473,7 @@ def run_forward_pass(
                         next_actions_mask=next_actions_mask,
                         use_proprio=use_proprio,
                         use_film=use_film,
+                        torch_dtype=torch_dtype,
                     )
 
         metrics.update(
@@ -466,6 +516,7 @@ def run_diffusion_sampling(
     next_actions_mask,
     use_proprio,
     use_film,
+    torch_dtype: torch.dtype,
 ) -> torch.Tensor:
     """
     Run diffusion sampling (reverse diffusion) to generate actions.
@@ -484,6 +535,7 @@ def run_diffusion_sampling(
         next_actions_mask (torch.Tensor): Mask for next actions.
         use_proprio (bool): Whether to use proprioceptive state as input.
         use_film (bool): Whether to use FiLM for better language following.
+        torch_dtype (torch.dtype): Dtype for model inputs/autocast.
 
     Returns:
         torch.Tensor: Predicted actions.
@@ -492,7 +544,7 @@ def run_diffusion_sampling(
     noise = torch.randn(
         size=(batch_size, NUM_ACTIONS_CHUNK, ACTION_DIM),
         device=device_id,
-        dtype=torch.bfloat16,
+        dtype=torch_dtype,
     )  # (B, chunk_len, action_dim)
 
     # Set diffusion timestep values
@@ -509,11 +561,12 @@ def run_diffusion_sampling(
         )  # (B, llm_dim)
         diffusion_timestep_embeddings = diffusion_timestep_embeddings.unsqueeze(1)  # (B, 1, llm_dim)
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        autocast_dtype = torch_dtype if torch_dtype in (torch.float16, torch.bfloat16) else None
+        with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
             output = vla(
                 input_ids=batch["input_ids"].to(device_id),
                 attention_mask=batch["attention_mask"].to(device_id),
-                pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
+                pixel_values=batch["pixel_values"].to(torch_dtype).to(device_id),
                 labels=batch["labels"],
                 output_hidden_states=True,
                 proprio=batch["proprio"] if use_proprio else None,
@@ -531,7 +584,7 @@ def run_diffusion_sampling(
             actions_hidden_states = text_hidden_states[current_action_mask | next_actions_mask].reshape(
                 batch_size, NUM_ACTIONS_CHUNK * ACTION_DIM, -1
             )  # (B, act_chunk_len, D)
-            actions_hidden_states = actions_hidden_states.to(torch.bfloat16)
+            actions_hidden_states = actions_hidden_states.to(torch_dtype)
             # Predict noise
             noise_pred = action_head.module.predict_noise(actions_hidden_states)
 
@@ -663,7 +716,7 @@ def save_training_checkpoint(
     # Note: Can be very slow on some devices; if so, we recommend merging offline
     if cfg.use_lora and cfg.merge_lora_during_training:
         base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+            cfg.vla_path, torch_dtype=resolve_torch_dtype(cfg.torch_dtype), low_cpu_mem_usage=True, trust_remote_code=True
         )
         merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
         merged_vla = merged_vla.merge_and_unload()
@@ -684,6 +737,7 @@ def run_validation(
     val_dataloader,
     action_tokenizer,
     device_id,
+    torch_dtype: torch.dtype,
     cfg,
     num_patches,
     log_step,
@@ -701,6 +755,7 @@ def run_validation(
         val_dataloader (DataLoader): Validation data loader.
         action_tokenizer (ActionTokenizer): Action tokenizer.
         device_id (str): Device ID.
+        torch_dtype (torch.dtype): Dtype used for model inputs/autocast.
         cfg (FinetuneConfig): Training configuration.
         num_patches (int): Number of vision patches.
         log_step (int): Current logging step.
@@ -728,6 +783,7 @@ def run_validation(
                 batch=batch,
                 action_tokenizer=action_tokenizer,
                 device_id=device_id,
+                torch_dtype=torch_dtype,
                 use_l1_regression=cfg.use_l1_regression,
                 use_diffusion=cfg.use_diffusion,
                 use_proprio=cfg.use_proprio,
@@ -736,6 +792,13 @@ def run_validation(
                 compute_diffusion_l1=True,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
+                use_discrete_flow_matching=cfg.use_discrete_flow_matching,
+                dfm_schedule=cfg.dfm_schedule,
+                dfm_time_eps=cfg.dfm_time_eps,
+                dfm_t_min=cfg.dfm_t_min,
+                dfm_t_max=cfg.dfm_t_max,
+                dfm_loss_mode=cfg.dfm_loss_mode,
+                dfm_weight_clip=cfg.dfm_weight_clip,
             )
 
             # Add the loss value to the metrics
@@ -782,6 +845,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
         "Cannot do both L1 regression and diffusion. Please pick one of them!"
     )
+    assert not (cfg.use_discrete_diffusion and cfg.use_discrete_flow_matching), (
+        "Cannot enable both discrete diffusion and discrete flow matching!"
+    )
+    assert not (cfg.use_discrete_flow_matching and (cfg.use_l1_regression or cfg.use_diffusion)), (
+        "DFM is not compatible with continuous action heads (L1 regression or diffusion)."
+    )
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
@@ -799,6 +868,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     device_id = distributed_state.local_process_index
     torch.cuda.set_device(device_id)
     torch.cuda.empty_cache()
+    torch_dtype = resolve_torch_dtype(cfg.torch_dtype)
 
     # Initialize wandb logging
     if distributed_state.is_main_process:
@@ -845,19 +915,23 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Load processor and VLA
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
-    if cfg.use_discrete_diffusion:
+    # Load the model configuration
+    model_config = AutoConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
+
+    if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
         processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
-        # Load the model configuration
-        model_config = AutoConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
         # Set the mask token ID on the configuration instance
         model_config.set_mask_token_id(processor.tokenizer.mask_token_id)
         # model_config.set_vocab_size(len(processor.tokenizer))  # 自行向上取整到64的整数倍, 原本还有空间不需要调整
+    if cfg.use_discrete_diffusion:
         model_config.set_dicrete_diffusion()
+    if cfg.use_discrete_flow_matching:
+        model_config.set_discrete_flow_matching()
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
         config=model_config,  # Pass the updated config
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     ).to(device_id)
@@ -905,6 +979,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg,
             device_id,
             {"llm_dim": vla.module.llm_dim, "proprio_dim": PROPRIO_DIM},
+            to_dtype=torch_dtype,
         )
 
     action_head = None
@@ -916,7 +991,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg,
             device_id,
             {"input_dim": vla.module.llm_dim, "hidden_dim": vla.module.llm_dim, "action_dim": ACTION_DIM},
-            to_bf16=True,
+            to_dtype=torch_dtype,
         )
 
     # If applicable, instantiate diffusion action head and noisy action projector
@@ -932,10 +1007,15 @@ def finetune(cfg: FinetuneConfig) -> None:
                 "action_dim": ACTION_DIM,
                 "num_diffusion_steps_train": cfg.num_diffusion_steps_train,
             },
-            to_bf16=True,
+            to_dtype=torch_dtype,
         )
         noisy_action_projector = init_module(
-            NoisyActionProjector, "noisy_action_projector", cfg, device_id, {"llm_dim": vla.module.llm_dim}
+            NoisyActionProjector,
+            "noisy_action_projector",
+            cfg,
+            device_id,
+            {"llm_dim": vla.module.llm_dim},
+            to_dtype=torch_dtype,
         )
 
     # Get number of vision patches
@@ -1050,6 +1130,11 @@ def finetune(cfg: FinetuneConfig) -> None:
         "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
         "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
         "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_kappa_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_mask_frac_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_w_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_frac_w_clipped": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_num_supervised_tokens": deque(maxlen=cfg.grad_accumulation_steps),
     }
 
     # Start training
@@ -1067,6 +1152,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 batch=batch,
                 action_tokenizer=action_tokenizer,
                 device_id=device_id,
+                torch_dtype=torch_dtype,
                 use_l1_regression=cfg.use_l1_regression,
                 use_diffusion=cfg.use_diffusion,
                 use_proprio=cfg.use_proprio,
@@ -1075,6 +1161,13 @@ def finetune(cfg: FinetuneConfig) -> None:
                 compute_diffusion_l1=compute_diffusion_l1,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
+                use_discrete_flow_matching=cfg.use_discrete_flow_matching,
+                dfm_schedule=cfg.dfm_schedule,
+                dfm_time_eps=cfg.dfm_time_eps,
+                dfm_t_min=cfg.dfm_t_min,
+                dfm_t_max=cfg.dfm_t_max,
+                dfm_loss_mode=cfg.dfm_loss_mode,
+                dfm_weight_clip=cfg.dfm_weight_clip,
             )
 
             # Normalize loss to account for gradient accumulation
@@ -1148,6 +1241,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     val_dataloader=val_dataloader,
                     action_tokenizer=action_tokenizer,
                     device_id=device_id,
+                    torch_dtype=torch_dtype,
                     cfg=cfg,
                     num_patches=NUM_PATCHES,
                     log_step=log_step,
