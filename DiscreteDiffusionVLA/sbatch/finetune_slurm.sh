@@ -39,9 +39,6 @@ cd "${REPO_ROOT}"
 
 # Activate a virtualenv if available (robust check)
 VENV_ACTIVATE=${VENV_ACTIVATE:-"${REPO_ROOT}/.venv/bin/activate"}
-if [ ! -f "${VENV_ACTIVATE}" ] && [ -f "${REPO_ROOT}/.venv-ubuntu-nvidia/bin/activate" ]; then
-  VENV_ACTIVATE="${REPO_ROOT}/.venv-ubuntu-nvidia/bin/activate"
-fi
 if [ ! -f "${VENV_ACTIVATE}" ]; then
   echo "ERROR: Virtualenv activate script not found at ${VENV_ACTIVATE}." 1>&2
   ls -la "${REPO_ROOT}"

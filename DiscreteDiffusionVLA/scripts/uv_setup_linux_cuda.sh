@@ -43,3 +43,6 @@ uv pip install "peft==0.11.1" "diffusers==0.24.0" "accelerate==0.23.0" "huggingf
 uv pip install packaging ninja
 ninja --version; echo $?
 uv pip install "flash-attn==2.5.5" --no-build-isolation
+
+uv pip install -e LIBERO
+uv pip install -r experiments/robot/libero/libero_requirements.txt
