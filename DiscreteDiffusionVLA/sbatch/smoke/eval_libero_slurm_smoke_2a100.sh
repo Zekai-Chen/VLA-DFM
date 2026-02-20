@@ -46,6 +46,7 @@ if [ ! -f "${VENV_ACTIVATE}" ]; then
 fi
 # shellcheck disable=SC1091
 source "${VENV_ACTIVATE}"
+export LIBERO_CONFIG_PATH=/projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/.libero
 
 # --- Basic diagnostics ---
 mkdir -p logs
@@ -96,10 +97,17 @@ start_job() {
   local GPU_INDEX=$(( SLOT / MAX_PER_GPU ))
   local GPU=${GPUS[$GPU_INDEX]}
 
+  local CKPT_PATH="${CHECKPOINT_ROOT}--${STEP}_chkpt"
+  if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
+    CKPT_PATH="${CHECKPOINT_ROOT}"
+  elif [[ -d "${CHECKPOINT_ROOT}/${STEP}_chkpt" ]]; then
+    CKPT_PATH="${CHECKPOINT_ROOT}/${STEP}_chkpt"
+  fi
+
   echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
-      --pretrained_checkpoint "${CHECKPOINT_ROOT}--${STEP}_chkpt" \
+      --pretrained_checkpoint "${CKPT_PATH}" \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \
@@ -109,7 +117,7 @@ start_job() {
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
-      --use_wandb False \
+      --use_wandb True \
     > "$LOG_DIR/eval_${STEP}.log" 2>&1 &
 
   JOB_PIDS[$SLOT]=$!

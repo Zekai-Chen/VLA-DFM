@@ -46,6 +46,7 @@ if [ ! -f "${VENV_ACTIVATE}" ]; then
 fi
 # shellcheck disable=SC1091
 source "${VENV_ACTIVATE}"
+export LIBERO_CONFIG_PATH=/projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/.libero
 
 # --- Basic diagnostics ---
 mkdir -p logs
@@ -68,7 +69,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="${BASE_DIR}/checkpoints/ddopenvla-libero-object/openvla-7b+libero_object_no_noops"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b2+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260219_1208"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 
@@ -97,10 +98,17 @@ start_job() {
   local GPU_INDEX=$(( SLOT / MAX_PER_GPU ))
   local GPU=${GPUS[$GPU_INDEX]}
 
+  local CKPT_PATH="${CHECKPOINT_ROOT}--${STEP}_chkpt"
+  if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
+    CKPT_PATH="${CHECKPOINT_ROOT}"
+  elif [[ -d "${CHECKPOINT_ROOT}/${STEP}_chkpt" ]]; then
+    CKPT_PATH="${CHECKPOINT_ROOT}/${STEP}_chkpt"
+  fi
+
   echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
-      --pretrained_checkpoint "${CHECKPOINT_ROOT}--${STEP}_chkpt" \
+      --pretrained_checkpoint "${CKPT_PATH}" \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \
@@ -110,7 +118,7 @@ start_job() {
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
-      --use_wandb False \
+      --use_wandb True \
     > "$LOG_DIR/eval_${STEP}.log" 2>&1 &
 
   JOB_PIDS[$SLOT]=$!
