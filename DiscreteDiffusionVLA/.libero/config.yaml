@@ -1,0 +1,5 @@
+benchmark_root: /projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/LIBERO/libero/libero
+bddl_files: /projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/LIBERO/libero/libero/bddl_files
+init_states: /projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/LIBERO/libero/libero/init_files
+datasets: /scratch/ywn1043/VLA-DFM/RLDS/modified_libero_rlds
+assets: /projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/LIBERO/libero/libero/assets
