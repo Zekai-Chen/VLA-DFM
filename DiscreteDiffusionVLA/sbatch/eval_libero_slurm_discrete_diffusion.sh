@@ -47,7 +47,7 @@ fi
 # shellcheck disable=SC1091
 source "${VENV_ACTIVATE}"
 WANDB_ENTITY=${WANDB_ENTITY:-a10v-1}
-WANDB_PROJECT=${WANDB_PROJECT:-openvla-eval}
+WANDB_PROJECT=${WANDB_PROJECT:-VLA-DFM}
 export WANDB_ENTITY WANDB_PROJECT
 export LIBERO_CONFIG_PATH=/projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/.libero
 
