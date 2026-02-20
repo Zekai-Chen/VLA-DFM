@@ -71,9 +71,9 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="${BASE_DIR}/checkpoints/ddopenvla-libero-object/openvla-7b+libero_object_no_noops"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b2+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260219_1208"
 TASK_SUITE="libero_object"
-NUM_TRIALS=2
+NUM_TRIALS=50
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
