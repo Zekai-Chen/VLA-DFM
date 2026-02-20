@@ -46,6 +46,9 @@ if [ ! -f "${VENV_ACTIVATE}" ]; then
 fi
 # shellcheck disable=SC1091
 source "${VENV_ACTIVATE}"
+WANDB_ENTITY=${WANDB_ENTITY:-a10v-1}
+WANDB_PROJECT=${WANDB_PROJECT:-openvla-eval}
+export WANDB_ENTITY WANDB_PROJECT
 export LIBERO_CONFIG_PATH=/projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/.libero
 
 # --- Basic diagnostics ---
@@ -119,6 +122,8 @@ start_job() {
       --use_proprio True \
       --topk_filter_thres 0.0 \
       --use_wandb True \
+      --wandb_entity "${WANDB_ENTITY}" \
+      --wandb_project "${WANDB_PROJECT}" \
     > "$LOG_DIR/eval_${STEP}.log" 2>&1 &
 
   JOB_PIDS[$SLOT]=$!
