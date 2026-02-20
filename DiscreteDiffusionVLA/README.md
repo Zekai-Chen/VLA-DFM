@@ -39,6 +39,8 @@ Notes:
   (we took a random crop with 90% area in every training sample, so at test time we simply take the center 90% crop).
 * The evaluation script logs results locally. You can also log results in Weights & Biases
   by setting `--use_wandb True` and specifying `--wandb_project <PROJECT>` and `--wandb_entity <ENTITY>`.
+* If an eval SLURM job fails without errors in the sbatch logs, check the per-step eval logs under
+  `/scratch/ywn1043/VLA-DFM/logs/eval_smoke/` (e.g., `/scratch/ywn1043/VLA-DFM/logs/eval_smoke/0219_1822/`).
 * Note that results may vary slightly if you use a different GPU than the A100.
 * Please be sure to test your policy with the same device/GPU used to train it! Otherwise, performance may drop substantially. You may be able to avoid the performance drop if you merge the LoRA weights into the base model on the downstream device used for testing (e.g., if you train on H100 and then merge on A100 before testing on A100). You can see our script [vla-scripts/merge_lora_weights_and_save.py](vla-scripts/merge_lora_weights_and_save.py) for merging the LoRA adapter into the base model offline. It's okay if you already merged LoRA weights into the base OpenVLA model during fine-tuning; you can always redownload the base model and merge again as long as you still have the LoRA adapter (`merge_lora_weights_and_save.py` will handle this for you).
 
