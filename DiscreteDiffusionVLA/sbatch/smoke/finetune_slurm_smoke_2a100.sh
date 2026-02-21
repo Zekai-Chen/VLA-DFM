@@ -2,6 +2,7 @@
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu              # GPU partition (48 h max)
 #SBATCH --gres=gpu:a100:2               # 2×A100 GPUs
+#SBATCH --constraint=sxm
 #SBATCH --nodes=1
 #SBATCH --mem=120G
 #SBATCH --time=47:00:00                 # smoke run
@@ -75,7 +76,8 @@ DATASET_NAME="libero_object_no_noops"
 RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke"
 
 # --- Training params (short) ---
-BATCH_SIZE=2
+# Increased to better utilize 80GB A100s while leaving headroom for spikes.
+BATCH_SIZE=4
 LEARNING_RATE=5e-4
 NUM_STEPS_BEFORE_DECAY=10000
 MAX_STEPS=20000
