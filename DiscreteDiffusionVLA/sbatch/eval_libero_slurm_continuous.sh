@@ -104,7 +104,7 @@ STEPS=(
 )
 
 # --- Eval params (adjust paths) ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b2+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260219_1208"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b2+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260219_1518"
 TASK_SUITE="libero_object"
 
 # initialization
