@@ -77,7 +77,7 @@ RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke"
 
 # --- Training params (short) ---
 # Increased to better utilize 80GB A100s while leaving headroom for spikes.
-BATCH_SIZE=4
+BATCH_SIZE=6
 LEARNING_RATE=5e-4
 NUM_STEPS_BEFORE_DECAY=10000
 MAX_STEPS=20000
