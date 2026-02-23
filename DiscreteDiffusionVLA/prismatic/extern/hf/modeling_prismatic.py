@@ -7,6 +7,7 @@ but exactly replicate the logic in `prismatic.models.vlms.prismatic.py`.
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union
@@ -861,6 +862,43 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 )
                 denom = (1.0 - kappa_t).clamp(min=1e-8)
                 dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)
+                if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
+                    self._dfm_debug_step = getattr(self, "_dfm_debug_step", 0) + 1
+                    debug_every = int(os.environ.get("VLA_DFM_DEBUG_EVERY", "200"))
+                    if self._dfm_debug_step % debug_every == 0:
+                        is_rank0 = (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+                        if is_rank0:
+                            with torch.no_grad():
+                                supervised_mask = labels != IGNORE_INDEX
+                                action_mask = loss_mask_full
+                                supervised_in_action = supervised_mask & action_mask
+                                supervised_outside_action = supervised_mask & (~action_mask)
+                                action_count = action_mask.sum().item()
+                                supervised_count = supervised_in_action.sum().item()
+                                outside_count = supervised_outside_action.sum().item()
+                                supervised_frac = supervised_count / max(action_count, 1)
+                                per_batch_frac = (
+                                    dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
+                                ).mean().item()
+                                logger.info(
+                                    "[DFM DEBUG] supervised_action_tokens=%d/%d (%.4f) "
+                                    "per_batch_supervised_frac=%.4f supervised_outside_action=%d "
+                                    "dfm_loss_mask_sum=%d",
+                                    supervised_count,
+                                    action_count,
+                                    supervised_frac,
+                                    per_batch_frac,
+                                    outside_count,
+                                    dfm_loss_mask.sum().item(),
+                                )
+                                if supervised_count == 0:
+                                    logger.warning(
+                                        "[DFM DEBUG] No supervised action tokens (all -100). Check masking/labels."
+                                    )
+                                if outside_count > 0:
+                                    logger.warning(
+                                        "[DFM DEBUG] Found supervised tokens outside action mask. Check loss_mask_full/labels."
+                                    )
 
             else:
                 # Replace the embeddings of the action tokens with zeros
