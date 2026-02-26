@@ -1423,6 +1423,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         dfm_corrector_remask_frac: float = 0.1,
         dfm_clamp_mask: bool = False,
         dfm_clamp_values: Optional[torch.LongTensor] = None,
+        return_debug: bool = False,
+        dfm_debug_level: int = 1,
     ):
         """CTMC discrete flow matching prediction."""
         assert input_ids is not None, "Input IDs must be provided for DFM prediction!"
@@ -1487,6 +1489,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             cur_seqs = masked_input_ids[
                 :, 1 + NUM_PROMPT_TOKENS : 1 + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK
             ]
+            init_snapshot = None
+            if return_debug and dfm_debug_level >= 2:
+                init_snapshot = cur_seqs[0, :16].detach().cpu().tolist()
 
             clamp_values = None
             if dfm_clamp_values is not None:
@@ -1525,6 +1530,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 corrector_remask_frac=dfm_corrector_remask_frac,
                 clamp_mask=clamp_mask,
                 clamp_values=clamp_values,
+                debug_level=dfm_debug_level if return_debug else 0,
             )
             # Telemetry: fraction of decoded tokens in action vocab range
             n_bins = self.bin_centers.shape[0] + 1
@@ -1533,6 +1539,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             in_action = (final_ids >= action_low) & (final_ids < action_high)
             dfm_stats["dfm_in_action_frac_final"] = in_action.float().mean().item()
             self.last_dfm_stats = dfm_stats
+            if return_debug:
+                self.last_dfm_debug = None
 
             predicted_action_token_ids = final_ids.cpu().numpy()
             discretized_actions = self.vocab_size - predicted_action_token_ids
@@ -1540,6 +1548,46 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
+            debug = None
+            if return_debug:
+                # Action stats
+                actions_tensor = torch.as_tensor(normalized_actions)
+                nan_frac = torch.isnan(actions_tensor).float().mean().item()
+                actions_safe = torch.nan_to_num(actions_tensor, nan=0.0)
+                action_min = actions_safe.min().item()
+                action_max = actions_safe.max().item()
+                action_mean = actions_safe.mean().item()
+                action_std = actions_safe.std().item()
+                clip_frac = ((actions_tensor <= -1.0) | (actions_tensor >= 1.0)).float().mean().item()
+                debug = {
+                    "mask_token_id": int(mask_token_id),
+                    "mask_frac_final": dfm_stats.get("dfm_mask_frac_final"),
+                    "valid_action_frac_final": dfm_stats.get("dfm_in_action_frac_final"),
+                    "num_unique_action_tokens": int(final_ids.unique().numel()),
+                    "action_stats": {
+                        "min": action_min,
+                        "max": action_max,
+                        "mean": action_mean,
+                        "std": action_std,
+                        "nan_frac": nan_frac,
+                        "clip_frac": clip_frac,
+                    },
+                    "dfm_stats": dfm_stats,
+                    "action_vocab_range": {
+                        "low": int(action_low),
+                        "high": int(action_high),
+                        "n_bins": int(n_bins),
+                    },
+                }
+                if dfm_debug_level >= 2:
+                    debug["token_snapshot"] = {
+                        "init": init_snapshot,
+                        "final": final_ids[0, :16].detach().cpu().tolist(),
+                    }
+                self.last_dfm_debug = debug
+
+        if return_debug:
+            return normalized_actions, actions_hidden_states, debug
         return normalized_actions, actions_hidden_states
 
     def predict_action(
@@ -1568,6 +1616,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         dfm_corrector_remask_frac: float = 0.1,
         dfm_clamp_mask: bool = False,
         dfm_clamp_values: Optional[torch.LongTensor] = None,
+        return_debug: bool = False,
+        dfm_debug_level: int = 1,
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -1642,6 +1692,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         if use_diffusion:
             NUM_PATCHES += 1
 
+        debug = None
         if use_diffusion:
             assert use_discrete_diffusion is False, "Discrete diffusion has not been supported in this method!"
             assert use_discrete_flow_matching is False, "DFM is not supported with diffusion action head!"
@@ -1665,7 +1716,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
         else:
             if use_discrete_flow_matching:
-                normalized_actions, actions_hidden_states = self._discrete_flow_matching_prediction(
+                dfm_result = self._discrete_flow_matching_prediction(
                     input_embeddings,
                     all_actions_mask,
                     projected_patch_embeddings,
@@ -1690,7 +1741,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     dfm_corrector_remask_frac=dfm_corrector_remask_frac,
                     dfm_clamp_mask=dfm_clamp_mask,
                     dfm_clamp_values=dfm_clamp_values,
+                    return_debug=return_debug,
+                    dfm_debug_level=dfm_debug_level,
                 )
+                if return_debug:
+                    normalized_actions, actions_hidden_states, debug = dfm_result
+                else:
+                    normalized_actions, actions_hidden_states = dfm_result
             elif use_discrete_diffusion:
                 normalized_actions, actions_hidden_states = self._discrete_diffusion_prediction(
                     input_embeddings,
@@ -1719,6 +1776,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
 
+        if return_debug:
+            return actions, actions_hidden_states, debug
         return actions, actions_hidden_states
 
     @staticmethod
