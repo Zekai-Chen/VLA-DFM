@@ -724,6 +724,8 @@ def get_vla_action(
     use_film: bool = False,
     use_discrete_diffusion: bool = False,
     use_discrete_flow_matching: bool = False,
+    return_debug: bool = False,
+    dfm_debug_level: int = 1,
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -744,6 +746,7 @@ def get_vla_action(
         List[np.ndarray]: Predicted actions
     """
     with torch.inference_mode():
+        debug = None
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
             processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
@@ -813,65 +816,130 @@ def get_vla_action(
         # Generate action
         if action_head is None:
             # Standard VLA output (single-image inputs, discrete actions)
-            action, _ = vla.predict_action(
-                **inputs,
-                unnorm_key=cfg.unnorm_key,
-                do_sample=False,
-                proprio=proprio,  # TODO new add
-                proprio_projector=proprio_projector,
-                noisy_action_projector=noisy_action_projector,
-                action_head=action_head,
-                use_film=use_film,
-                use_discrete_diffusion=use_discrete_diffusion,
-                use_discrete_flow_matching=use_discrete_flow_matching,
-                dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
-                dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
-                dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
-                dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
-                dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
-                dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
-                dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
-                dfm_corrector=getattr(cfg, "dfm_corrector", False),
-                dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
-                dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
-                dfm_clamp_mask=clamp_mask,
-                dfm_clamp_values=clamp_values,
+            if return_debug:
+                action, _, debug = vla.predict_action(
+                    **inputs,
+                    unnorm_key=cfg.unnorm_key,
+                    do_sample=False,
+                    proprio=proprio,  # TODO new add
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    action_head=action_head,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                    dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                    dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                    dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                    dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                    dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                    dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                    dfm_clamp_mask=clamp_mask,
+                    dfm_clamp_values=clamp_values,
+                    return_debug=True,
+                    dfm_debug_level=dfm_debug_level,
+                )
+            else:
+                action, _ = vla.predict_action(
+                    **inputs,
+                    unnorm_key=cfg.unnorm_key,
+                    do_sample=False,
+                    proprio=proprio,  # TODO new add
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    action_head=action_head,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                    dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                    dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                    dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                    dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                    dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                    dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                    dfm_clamp_mask=clamp_mask,
+                    dfm_clamp_values=clamp_values,
                 )
         else:
             # Custom action head for continuous actions
-            action, _ = vla.predict_action(
-                **inputs,
-                unnorm_key=cfg.unnorm_key,
-                do_sample=False,
-                proprio=proprio,
-                proprio_projector=proprio_projector,
-                noisy_action_projector=noisy_action_projector,
-                action_head=action_head,
-                use_film=use_film,
-                use_discrete_diffusion=use_discrete_diffusion,
-                use_discrete_flow_matching=use_discrete_flow_matching,
-                dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
-                dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
-                dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
-                dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
-                dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
-                dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
-                dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
-                dfm_corrector=getattr(cfg, "dfm_corrector", False),
-                dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
-                dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
-                dfm_clamp_mask=clamp_mask,
-                dfm_clamp_values=clamp_values,
-            )
+            if return_debug:
+                action, _, debug = vla.predict_action(
+                    **inputs,
+                    unnorm_key=cfg.unnorm_key,
+                    do_sample=False,
+                    proprio=proprio,
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    action_head=action_head,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                    dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                    dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                    dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                    dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                    dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                    dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                    dfm_clamp_mask=clamp_mask,
+                    dfm_clamp_values=clamp_values,
+                    return_debug=True,
+                    dfm_debug_level=dfm_debug_level,
+                )
+            else:
+                action, _ = vla.predict_action(
+                    **inputs,
+                    unnorm_key=cfg.unnorm_key,
+                    do_sample=False,
+                    proprio=proprio,
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    action_head=action_head,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
+                    dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
+                    dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
+                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
+                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
+                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
+                    dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
+                    dfm_corrector=getattr(cfg, "dfm_corrector", False),
+                    dfm_corrector_iters=getattr(cfg, "dfm_corrector_iters", 1),
+                    dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
+                    dfm_clamp_mask=clamp_mask,
+                    dfm_clamp_values=clamp_values,
+                )
 
     # Return action chunk as list of actions
-    return [action[i] for i in range(len(action))]
+    actions_list = [action[i] for i in range(len(action))]
+    if return_debug:
+        return actions_list, debug
+    return actions_list
 
 
 def get_action_from_server(

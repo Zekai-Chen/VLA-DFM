@@ -108,6 +108,8 @@ def get_action(
     use_film: bool = False,
     use_discrete_diffusion: bool = False,
     use_discrete_flow_matching: bool = False,
+    return_debug: bool = False,
+    dfm_debug_level: int = 1,
 ) -> Union[List[np.ndarray], np.ndarray]:
     """
     Query the model to get action predictions.
@@ -132,22 +134,41 @@ def get_action(
     """
     with torch.no_grad():
         if cfg.model_family == "openvla":
-            action = get_vla_action(
-                cfg=cfg,
-                vla=model,
-                processor=processor,
-                obs=obs,
-                task_label=task_label,
-                action_head=action_head,
-                proprio_projector=proprio_projector,
-                noisy_action_projector=noisy_action_projector,
-                use_film=use_film,
-                use_discrete_diffusion=use_discrete_diffusion,
-                use_discrete_flow_matching=use_discrete_flow_matching,
-            )
+            if return_debug:
+                action, debug = get_vla_action(
+                    cfg=cfg,
+                    vla=model,
+                    processor=processor,
+                    obs=obs,
+                    task_label=task_label,
+                    action_head=action_head,
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                    return_debug=True,
+                    dfm_debug_level=dfm_debug_level,
+                )
+            else:
+                action = get_vla_action(
+                    cfg=cfg,
+                    vla=model,
+                    processor=processor,
+                    obs=obs,
+                    task_label=task_label,
+                    action_head=action_head,
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    use_film=use_film,
+                    use_discrete_diffusion=use_discrete_diffusion,
+                    use_discrete_flow_matching=use_discrete_flow_matching,
+                )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")
 
+    if return_debug:
+        return action, debug
     return action
 
 

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -110,6 +111,15 @@ class GenerateConfig:
     dfm_corrector_remask_frac: float = 0.1           # Remask fraction in corrector
     dfm_clamp_mask: bool = False                     # Clamp non-mask tokens during CTMC
     dfm_clamp_values: Optional[str] = None           # Optional clamp values spec/path
+
+    # DFM debug / tracing
+    dfm_debug: bool = False                          # If True, emit per-chunk debug payloads
+    dfm_debug_level: int = 1                         # 1 = cheap invariants, 2 = per-step dynamics
+    dfm_debug_dir: Optional[str] = None              # Override debug dir (defaults to local_log_dir/debug)
+    dfm_fail_fast: bool = False                      # If True, raise on invariant violations
+    dfm_min_valid_action_frac: float = 0.999         # Fail-fast threshold for in-action fraction
+    dfm_max_mask_frac: float = 0.0                   # Fail-fast threshold for final mask fraction
+    dfm_max_nan_frac: float = 0.0                    # Fail-fast threshold for NaN action fraction
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -248,6 +258,20 @@ def log_message(message: str, log_file=None):
         log_file.flush()
 
 
+class JsonlWriter:
+    """Simple JSONL writer with line-buffered output."""
+
+    def __init__(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._fh = open(path, "a", buffering=1)
+
+    def write(self, obj: dict) -> None:
+        self._fh.write(json.dumps(obj, default=str) + "\n")
+
+    def close(self) -> None:
+        self._fh.close()
+
+
 def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=None):
     """Load initial states for the given task."""
     # Get default initial states
@@ -303,6 +327,8 @@ def run_episode(
     cfg: GenerateConfig,
     env,
     task_description: str,
+    task_id: int,
+    episode_idx: int,
     model,
     resize_size,
     processor=None,
@@ -328,6 +354,14 @@ def run_episode(
               f"({NUM_ACTIONS_CHUNK}) constant defined in prismatic.vla.constants! For best performance (in terms of "
                "both speed and success rate), we recommend executing the full action chunk.")
     action_queue = deque(maxlen=cfg.num_open_loop_steps)
+    chunk_idx = 0
+
+    debug_writer = None
+    if cfg.dfm_debug and cfg.use_discrete_flow_matching:
+        debug_dir = cfg.dfm_debug_dir or os.path.join(cfg.local_log_dir, "debug")
+        task_slug = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
+        debug_path = os.path.join(debug_dir, f"{task_slug}_seed{cfg.seed}_ep{episode_idx}.jsonl")
+        debug_writer = JsonlWriter(debug_path)
 
     # Setup
     t = 0
@@ -351,19 +385,65 @@ def run_episode(
             # If action queue is empty, requery model
             if len(action_queue) == 0:
                 # Query model to get action
-                actions = get_action(
-                    cfg,
-                    model,
-                    observation,
-                    task_description,
-                    processor=processor,
-                    action_head=action_head,
-                    proprio_projector=proprio_projector,
-                    noisy_action_projector=noisy_action_projector,
-                    use_film=cfg.use_film,
-                    use_discrete_diffusion=cfg.use_discrete_diffusion,
-                    use_discrete_flow_matching=cfg.use_discrete_flow_matching,
-                )
+                if cfg.dfm_debug and cfg.use_discrete_flow_matching:
+                    actions, debug = get_action(
+                        cfg,
+                        model,
+                        observation,
+                        task_description,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        noisy_action_projector=noisy_action_projector,
+                        use_film=cfg.use_film,
+                        use_discrete_diffusion=cfg.use_discrete_diffusion,
+                        use_discrete_flow_matching=cfg.use_discrete_flow_matching,
+                        return_debug=True,
+                        dfm_debug_level=cfg.dfm_debug_level,
+                    )
+                    if debug_writer is not None:
+                        debug_writer.write(
+                            {
+                                "t_wall": time.time(),
+                                "task": task_description,
+                                "task_id": task_id,
+                                "episode": episode_idx,
+                                "env_step": t,
+                                "chunk_idx": chunk_idx,
+                                "debug": debug,
+                            }
+                        )
+                    if cfg.dfm_fail_fast and debug is not None:
+                        valid_frac = debug.get("valid_action_frac_final")
+                        if valid_frac is not None and valid_frac < cfg.dfm_min_valid_action_frac:
+                            raise RuntimeError(
+                                f"DFM valid_action_frac_final below threshold: {valid_frac} < {cfg.dfm_min_valid_action_frac}"
+                            )
+                        mask_frac = debug.get("mask_frac_final")
+                        if mask_frac is not None and mask_frac > cfg.dfm_max_mask_frac:
+                            raise RuntimeError(
+                                f"DFM mask_frac_final above threshold: {mask_frac} > {cfg.dfm_max_mask_frac}"
+                            )
+                        nan_frac = debug.get("action_stats", {}).get("nan_frac")
+                        if nan_frac is not None and nan_frac > cfg.dfm_max_nan_frac:
+                            raise RuntimeError(
+                                f"DFM action_nan_frac above threshold: {nan_frac} > {cfg.dfm_max_nan_frac}"
+                            )
+                else:
+                    actions = get_action(
+                        cfg,
+                        model,
+                        observation,
+                        task_description,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        noisy_action_projector=noisy_action_projector,
+                        use_film=cfg.use_film,
+                        use_discrete_diffusion=cfg.use_discrete_diffusion,
+                        use_discrete_flow_matching=cfg.use_discrete_flow_matching,
+                    )
+                chunk_idx += 1
                 if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
                     dfm_stats = model.last_dfm_stats or {}
                     num_changed = dfm_stats.get("dfm_num_changed_tokens", [])
@@ -399,6 +479,17 @@ def run_episode(
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
+    finally:
+        if debug_writer is not None:
+            debug_writer.write(
+                {
+                    "task": task_description,
+                    "task_id": task_id,
+                    "episode": episode_idx,
+                    "success": bool(success),
+                }
+            )
+            debug_writer.close()
 
     return success, replay_images
 
@@ -456,6 +547,8 @@ def run_task(
             cfg,
             env,
             task_description,
+            task_id,
+            episode_idx,
             model,
             resize_size,
             processor,
