@@ -95,15 +95,15 @@ class GenerateConfig:
     use_discrete_diffusion: bool = False             # If True, uses discrete diffusion model for action generation
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
-    dfm_num_steps: int = 12                          # Number of CTMC steps
-    dfm_schedule: str = "cosine"                     # Schedule for kappa(t)
+    dfm_num_steps: int = 64                          # Number of CTMC steps
+    dfm_schedule: str = "linear"                     # Schedule for kappa(t)
     dfm_temperature: float = 1.0                     # Sampling temperature
     dfm_temperature_anneal: str = "none"             # none | linear
     dfm_adaptive_step: bool = True                   # Adaptive step size for CTMC
     dfm_step_min: float = 1e-4                       # Minimum step size
     dfm_step_max: float = 0.2                        # Maximum step size
     dfm_time_eps: float = 1e-3                       # Avoid t endpoints
-    dfm_early_exit: bool = True                      # Stop if no tokens change
+    dfm_early_exit: bool = False                     # Stop if no tokens change
     dfm_early_exit_frac: float = 0.0                 # Stop if changed/total < frac
     dfm_corrector: bool = False                      # Optional remask corrector
     dfm_corrector_iters: int = 1                     # Corrector iterations
@@ -368,15 +368,20 @@ def run_episode(
                     dfm_stats = model.last_dfm_stats or {}
                     num_changed = dfm_stats.get("dfm_num_changed_tokens", [])
                     num_changed_mean = float(sum(num_changed) / max(len(num_changed), 1)) if num_changed else 0.0
-                    wandb.log(
-                        {
-                            "DFM/NFE Realized": dfm_stats.get("dfm_nfe_realized", 0),
-                            "DFM/Early Exit Iter": dfm_stats.get("dfm_early_exit_iter", -1),
-                            "DFM/DT Safe Hits": dfm_stats.get("dfm_dt_safe_hits", 0),
-                            "DFM/DT Under Min": dfm_stats.get("dfm_dt_under_min", 0),
-                            "DFM/Num Changed Mean": num_changed_mean,
-                        }
-                    )
+                    log_payload = {
+                        "DFM/NFE Realized": dfm_stats.get("dfm_nfe_realized", 0),
+                        "DFM/Early Exit Iter": dfm_stats.get("dfm_early_exit_iter", -1),
+                        "DFM/DT Safe Hits": dfm_stats.get("dfm_dt_safe_hits", 0),
+                        "DFM/DT Under Min": dfm_stats.get("dfm_dt_under_min", 0),
+                        "DFM/Num Changed Mean": num_changed_mean,
+                    }
+                    mask_frac_final = dfm_stats.get("dfm_mask_frac_final", None)
+                    if mask_frac_final is not None:
+                        log_payload["DFM/Mask Frac Final"] = mask_frac_final
+                    in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
+                    if in_action_frac is not None:
+                        log_payload["DFM/InActionFracFinal"] = in_action_frac
+                    wandb.log(log_payload)
                 action_queue.extend(actions)
 
             # Get action from queue
