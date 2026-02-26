@@ -31,6 +31,7 @@ def dfm_decode(
     corrector_remask_frac: float = 0.1,
     clamp_mask: Optional[torch.BoolTensor] = None,    # True => do not update these positions
     clamp_values: Optional[torch.LongTensor] = None,
+    debug_level: int = 0,
 ) -> Tuple[torch.LongTensor, torch.Tensor, dict]:
     """Run CTMC hazard/tau-leaping updates for discrete flow matching.
 
@@ -55,6 +56,9 @@ def dfm_decode(
 
     actions_hidden_states = None
     num_changed_per_step = []
+    debug_p_update = []
+    debug_top1_prob = []
+    debug_unresolved = []
     dt_safe_hits = 0
     dt_under_min = 0
     early_exit_iter = -1
@@ -112,6 +116,20 @@ def dfm_decode(
         # Update probability for CTMC jump
         p_update = 1.0 - torch.exp(-h * hazard)
         p_update = p_update.clamp(min=0.0, max=1.0)
+        if debug_level >= 2:
+            debug_p_update.append(
+                {
+                    "mean": float(p_update.item()),
+                    "min": float(p_update.item()),
+                    "max": float(p_update.item()),
+                }
+            )
+            debug_unresolved.append(int(unresolved.sum().item()))
+            top1_probs = probs.max(dim=-1).values
+            if unresolved.any():
+                debug_top1_prob.append(float(top1_probs[unresolved].mean().item()))
+            else:
+                debug_top1_prob.append(0.0)
         # Broadcast to [B, L]
         update_mask = torch.rand_like(cur.float()) < p_update
         update_mask = update_mask & (sampled_flat != cur) & (~clamp_mask)
@@ -183,5 +201,9 @@ def dfm_decode(
         "dfm_mask_frac_final": dfm_mask_frac_final,
         "dfm_unresolved_final": dfm_unresolved_final,
     }
+    if debug_level >= 2:
+        stats["dfm_p_update"] = debug_p_update
+        stats["dfm_top1_prob_mean"] = debug_top1_prob
+        stats["dfm_unresolved_count"] = debug_unresolved
 
     return cur, actions_hidden_states, stats
