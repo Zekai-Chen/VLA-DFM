@@ -78,6 +78,7 @@ NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -127,6 +128,7 @@ start_job() {
       --dfm_debug ${DFM_DEBUG} \
       --dfm_debug_level ${DFM_DEBUG_LEVEL} \
       --dfm_fail_fast ${DFM_FAIL_FAST} \
+      --dfm_num_steps ${DFM_NUM_STEPS} \
       --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
