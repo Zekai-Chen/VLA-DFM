@@ -189,6 +189,28 @@ def dfm_decode(
             if clamp_values is not None:
                 cur = torch.where(clamp_mask, clamp_values, cur)
 
+    # Final fill: force-resolve any remaining masks in non-clamped positions
+    unresolved = (cur == mask_token_id) & (~clamp_mask)
+    if unresolved.any():
+        logits, actions_hidden_states = tokens_to_logits(cur)
+        logits = logits.float()
+        temp = temperature
+        if temperature_anneal == "linear":
+            temp = 1.0
+        elif temperature_anneal not in ("none", None):
+            raise ValueError(f"Unknown temperature_anneal: {temperature_anneal}")
+        if temp != 1.0:
+            logits = logits / temp
+        # Never sample mask token if it is within the logits vocabulary range
+        if 0 <= mask_token_id < logits.size(-1):
+            logits[..., mask_token_id] = -1e9
+        probs = F.softmax(logits, dim=-1)
+        flat_probs = probs.view(-1, probs.size(-1))
+        sampled_flat = torch.multinomial(flat_probs, 1).view(cur.shape)
+        cur = torch.where(unresolved, sampled_flat, cur)
+        if clamp_values is not None:
+            cur = torch.where(clamp_mask, clamp_values, cur)
+
     dfm_mask_frac_final = (cur == mask_token_id).float().mean().item()
     dfm_unresolved_final = ((cur == mask_token_id) & (~clamp_mask)).sum().item()
 
