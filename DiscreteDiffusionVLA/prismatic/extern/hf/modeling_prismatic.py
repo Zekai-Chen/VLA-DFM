@@ -1357,6 +1357,20 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             # Set all action tokens to MASK_TOKEN
             # Note: Keep EOS/STOP tokens unchanged since their all_actions_mask is False
             mask_token_id = self.mask_token_id
+            # Warn once if mask token collides with action-token range
+            if not getattr(self, "_dfm_mask_collision_warned", False):
+                n_bins = self.bin_centers.shape[0] + 1
+                action_low = self.vocab_size - n_bins
+                action_high = self.vocab_size - 1
+                if action_low <= mask_token_id <= action_high:
+                    logger.warning(
+                        "mask_token_id (%d) overlaps action-token range [%d, %d]. "
+                        "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
+                        mask_token_id,
+                        action_low,
+                        action_high,
+                    )
+                self._dfm_mask_collision_warned = True
             masked_input_ids = torch.where(
                 all_actions_mask, torch.tensor(mask_token_id, device=input_ids.device), input_ids
             )
@@ -1449,6 +1463,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
                     : self.vocab_size,
                 ]
+                # Restrict sampling to action-token vocabulary (last n_bins tokens)
+                n_bins = self.bin_centers.shape[0] + 1
+                action_low = self.vocab_size - n_bins
+                if action_low > 0:
+                    neg_inf = torch.finfo(full_logits.dtype).min
+                    full_logits[..., :action_low] = neg_inf
 
                 last_hidden_states = language_model_output.hidden_states[-1]
                 actions_hidden_states = last_hidden_states[
@@ -1506,6 +1526,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 clamp_mask=clamp_mask,
                 clamp_values=clamp_values,
             )
+            # Telemetry: fraction of decoded tokens in action vocab range
+            n_bins = self.bin_centers.shape[0] + 1
+            action_low = self.vocab_size - n_bins
+            action_high = self.vocab_size
+            in_action = (final_ids >= action_low) & (final_ids < action_high)
+            dfm_stats["dfm_in_action_frac_final"] = in_action.float().mean().item()
             self.last_dfm_stats = dfm_stats
 
             predicted_action_token_ids = final_ids.cpu().numpy()

@@ -77,6 +77,9 @@ def dfm_decode(
         logits = logits.float()
         if temp != 1.0:
             logits = logits / temp
+        # Never sample mask token if it is within the logits vocabulary range
+        if 0 <= mask_token_id < logits.size(-1):
+            logits[..., mask_token_id] = -1e9
         probs = F.softmax(logits, dim=-1)
 
         # Sample x1_i from posterior per position
@@ -112,6 +115,8 @@ def dfm_decode(
         # Broadcast to [B, L]
         update_mask = torch.rand_like(cur.float()) < p_update
         update_mask = update_mask & (sampled_flat != cur) & (~clamp_mask)
+        # Only update unresolved (masked) positions to match training corruption
+        update_mask = update_mask & unresolved
 
         cur = torch.where(update_mask, sampled_flat, cur)
         if clamp_values is not None:
@@ -119,10 +124,6 @@ def dfm_decode(
 
         num_changed = update_mask.sum().item()
         num_changed_per_step.append(num_changed)
-
-        if early_exit and num_changed == 0:
-            early_exit_iter = step
-            break
 
         if early_exit and early_exit_frac > 0.0:
             num_free = (~clamp_mask).sum().item()
@@ -170,12 +171,17 @@ def dfm_decode(
             if clamp_values is not None:
                 cur = torch.where(clamp_mask, clamp_values, cur)
 
+    dfm_mask_frac_final = (cur == mask_token_id).float().mean().item()
+    dfm_unresolved_final = ((cur == mask_token_id) & (~clamp_mask)).sum().item()
+
     stats = {
         "dfm_nfe_realized": len(num_changed_per_step),
         "dfm_early_exit_iter": early_exit_iter,
         "dfm_dt_safe_hits": dt_safe_hits,
         "dfm_dt_under_min": dt_under_min,
         "dfm_num_changed_tokens": num_changed_per_step,
+        "dfm_mask_frac_final": dfm_mask_frac_final,
+        "dfm_unresolved_final": dfm_unresolved_final,
     }
 
     return cur, actions_hidden_states, stats
