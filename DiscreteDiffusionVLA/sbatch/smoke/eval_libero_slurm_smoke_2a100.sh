@@ -75,6 +75,9 @@ mkdir -p "$LOG_DIR"
 CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260221_1349"
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
+DFM_DEBUG=${DFM_DEBUG:-True}
+DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
+DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -115,11 +118,16 @@ start_job() {
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \
       --use_diffusion False \
-      --use_discrete_diffusion True \
+      --use_discrete_diffusion False \
+      --use_discrete_flow_matching True \
       --use_film False \
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
+      --dfm_debug ${DFM_DEBUG} \
+      --dfm_debug_level ${DFM_DEBUG_LEVEL} \
+      --dfm_fail_fast ${DFM_FAIL_FAST} \
+      --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
       --wandb_project "${WANDB_PROJECT}" \

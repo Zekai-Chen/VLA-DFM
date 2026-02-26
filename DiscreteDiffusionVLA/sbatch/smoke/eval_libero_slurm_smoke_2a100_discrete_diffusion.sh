@@ -117,10 +117,12 @@ start_job() {
       --use_l1_regression False \
       --use_diffusion False \
       --use_discrete_diffusion True \
+      --use_discrete_flow_matching False \
       --use_film False \
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
+      --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
       --wandb_project "${WANDB_PROJECT}" \
