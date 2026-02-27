@@ -684,7 +684,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         loss_mask = masked_mask.float()
 
-        return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask, kappa_t, kdot_t
+        return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask, kappa_t, kdot_t, t
 
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
@@ -712,6 +712,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_t_max: float = 1.0,
         dfm_loss_mode: Optional[str] = None,
         dfm_weight_clip: float = 20.0,
+        dfm_train_mode: Optional[str] = None,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -731,10 +732,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         multimodal_labels = None
         dfm_stats = None
         dfm_action_token_count = None
+        dfm_t = None
 
         # Resolve DFM defaults
         dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
         dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
+        dfm_train_mode = dfm_train_mode or "flow"
 
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
@@ -842,26 +845,49 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             elif self.use_discrete_flow_matching:
                 loss_mask_full = all_actions_mask
                 dfm_action_token_count = loss_mask_full.sum(dim=1)
-                (
-                    input_ids,
-                    input_embeddings,
-                    labels,
-                    dfm_loss_mask,
-                    kappa_t,
-                    kdot_t,
-                ) = self.apply_mask_flow_matching(
-                    input_ids=input_ids,
-                    input_embeddings=input_embeddings,
-                    labels=labels,
-                    loss_mask_full=loss_mask_full,
-                    mask_token_id=self.mask_token_id,
-                    schedule=dfm_schedule,
-                    time_eps=dfm_time_eps,
-                    t_min=dfm_t_min,
-                    t_max=dfm_t_max,
-                )
-                denom = (1.0 - kappa_t).clamp(min=1e-8)
-                dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)
+                if dfm_train_mode == "diffusion_like":
+                    (
+                        input_ids,
+                        input_embeddings,
+                        labels,
+                        dfm_loss_mask,
+                    ) = self.apply_mask_diffusion(
+                        input_ids=input_ids,
+                        input_embeddings=input_embeddings,
+                        labels=labels,
+                        loss_mask_full=loss_mask_full,
+                        mask_token_id=self.mask_token_id,
+                        no_mask_token_prob=0.0,
+                    )
+                    mask_ratio = dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
+                    kappa_t = (1.0 - mask_ratio).clamp(min=0.0, max=1.0)
+                    kdot_t = torch.zeros_like(kappa_t)
+                    dfm_weight = torch.ones_like(kappa_t)
+                    dfm_t = None
+                    dfm_loss_mode = "masked_ce"
+                else:
+                    (
+                        input_ids,
+                        input_embeddings,
+                        labels,
+                        dfm_loss_mask,
+                        kappa_t,
+                        kdot_t,
+                        dfm_t,
+                    ) = self.apply_mask_flow_matching(
+                        input_ids=input_ids,
+                        input_embeddings=input_embeddings,
+                        labels=labels,
+                        loss_mask_full=loss_mask_full,
+                        mask_token_id=self.mask_token_id,
+                        schedule=dfm_schedule,
+                        time_eps=dfm_time_eps,
+                        t_min=dfm_t_min,
+                        t_max=dfm_t_max,
+                    )
+                    denom = (1.0 - kappa_t).clamp(min=1e-8)
+                    dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)
+                    mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
                 if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
                     self._dfm_debug_step = getattr(self, "_dfm_debug_step", 0) + 1
                     debug_every = int(os.environ.get("VLA_DFM_DEBUG_EVERY", "200"))
@@ -880,16 +906,36 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                                 per_batch_frac = (
                                     dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
                                 ).mean().item()
+                                t_mean = dfm_t.mean().item() if dfm_t is not None else float("nan")
+                                t_min = dfm_t.min().item() if dfm_t is not None else float("nan")
+                                t_max = dfm_t.max().item() if dfm_t is not None else float("nan")
+                                mr_mean = mask_ratio.mean().item()
+                                mr_min = mask_ratio.min().item()
+                                mr_max = mask_ratio.max().item()
+                                w_mean = dfm_weight.mean().item()
+                                w_min = dfm_weight.min().item()
+                                w_max = dfm_weight.max().item()
                                 logger.info(
                                     "[DFM DEBUG] supervised_action_tokens=%d/%d (%.4f) "
                                     "per_batch_supervised_frac=%.4f supervised_outside_action=%d "
-                                    "dfm_loss_mask_sum=%d",
+                                    "dfm_loss_mask_sum=%d t_mean=%.4f t_min=%.4f t_max=%.4f "
+                                    "mask_ratio_mean=%.4f mask_ratio_min=%.4f mask_ratio_max=%.4f "
+                                    "w_mean=%.4f w_min=%.4f w_max=%.4f",
                                     supervised_count,
                                     action_count,
                                     supervised_frac,
                                     per_batch_frac,
                                     outside_count,
                                     dfm_loss_mask.sum().item(),
+                                    t_mean,
+                                    t_min,
+                                    t_max,
+                                    mr_mean,
+                                    mr_min,
+                                    mr_max,
+                                    w_mean,
+                                    w_min,
+                                    w_max,
                                 )
                                 if supervised_count == 0:
                                     logger.warning(
@@ -989,10 +1035,19 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     mask_frac = multimodal_loss_mask.sum(dim=1) / multimodal_loss_mask.shape[1]
                 else:
                     mask_frac = dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
+                mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
                 dfm_stats = {
                     "kappa_mean": kappa_t.mean().detach(),
+                    "t_mean": dfm_t.mean().detach() if dfm_t is not None else torch.tensor(float("nan")),
+                    "t_min": dfm_t.min().detach() if dfm_t is not None else torch.tensor(float("nan")),
+                    "t_max": dfm_t.max().detach() if dfm_t is not None else torch.tensor(float("nan")),
+                    "mask_ratio_mean": mask_ratio.mean().detach(),
+                    "mask_ratio_min": mask_ratio.min().detach(),
+                    "mask_ratio_max": mask_ratio.max().detach(),
                     "mask_frac_mean": mask_frac.mean().detach(),
                     "w_mean": dfm_weight.mean().detach(),
+                    "w_min": dfm_weight.min().detach(),
+                    "w_max": dfm_weight.max().detach(),
                     "frac_w_clipped": (dfm_weight >= dfm_weight_clip).float().mean().detach(),
                     "num_supervised_tokens": dfm_loss_mask.sum().detach(),
                 }
@@ -1425,6 +1480,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         dfm_clamp_values: Optional[torch.LongTensor] = None,
         return_debug: bool = False,
         dfm_debug_level: int = 1,
+        dfm_decode_mode: str = "ctmc",
     ):
         """CTMC discrete flow matching prediction."""
         assert input_ids is not None, "Input IDs must be provided for DFM prediction!"
@@ -1531,6 +1587,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 clamp_mask=clamp_mask,
                 clamp_values=clamp_values,
                 debug_level=dfm_debug_level if return_debug else 0,
+                decode_mode=dfm_decode_mode,
             )
             # Telemetry: fraction of decoded tokens in action vocab range
             n_bins = self.bin_centers.shape[0] + 1
@@ -1550,6 +1607,17 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
             debug = None
             if return_debug:
+                action_start = 1 + NUM_PROMPT_TOKENS
+                action_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+                prefix = input_ids[:, :action_start]
+                suffix = input_ids[:, action_end:]
+                full_seq = torch.cat([prefix, final_ids, suffix], dim=1)
+                action_span_mask = torch.zeros_like(full_seq, dtype=torch.bool)
+                action_span_mask[:, action_start:action_end] = True
+                changed_off_action = (full_seq != input_ids) & (~action_span_mask)
+                changed_off_action_count = int(changed_off_action.sum().item())
+                stop_token_corrupted = bool((full_seq[:, -1] != input_ids[:, -1]).any().item())
+
                 # Action stats
                 actions_tensor = torch.as_tensor(normalized_actions)
                 nan_frac = torch.isnan(actions_tensor).float().mean().item()
@@ -1573,6 +1641,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                         "clip_frac": clip_frac,
                     },
                     "dfm_stats": dfm_stats,
+                    "changed_off_action_count": changed_off_action_count,
+                    "stop_token_corrupted": stop_token_corrupted,
                     "action_vocab_range": {
                         "low": int(action_low),
                         "high": int(action_high),
@@ -1618,6 +1688,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         dfm_clamp_values: Optional[torch.LongTensor] = None,
         return_debug: bool = False,
         dfm_debug_level: int = 1,
+        dfm_decode_mode: str = "ctmc",
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -1743,6 +1814,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     dfm_clamp_values=dfm_clamp_values,
                     return_debug=return_debug,
                     dfm_debug_level=dfm_debug_level,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
                 if return_debug:
                     normalized_actions, actions_hidden_states, debug = dfm_result

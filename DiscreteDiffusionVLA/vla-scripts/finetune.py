@@ -126,6 +126,7 @@ class FinetuneConfig:
     dfm_t_max: float = 1.0                           # Max t for sampling (capped by 1 - dfm_time_eps)
     dfm_loss_mode: str = "generalized_kl"            # generalized_kl | masked_ce
     dfm_weight_clip: float = 20.0                    # Clamp kappa_dot/(1-kappa)
+    dfm_train_mode: str = "flow"                     # flow | diffusion_like
 
     # fmt: on
 
@@ -313,6 +314,7 @@ def run_forward_pass(
     dfm_t_max: float = 1.0,
     dfm_loss_mode: str = "generalized_kl",
     dfm_weight_clip: float = 20.0,
+    dfm_train_mode: str = "flow",
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute model forward pass and metrics for both training and validation.
@@ -376,6 +378,7 @@ def run_forward_pass(
             dfm_t_max=dfm_t_max,
             dfm_loss_mode=dfm_loss_mode,
             dfm_weight_clip=dfm_weight_clip,
+            dfm_train_mode=dfm_train_mode,
         )
 
     # Get action masks needed for logging
@@ -422,6 +425,22 @@ def run_forward_pass(
                     "dfm_num_supervised_tokens": dfm_stats["num_supervised_tokens"].item(),
                 }
             )
+            if "t_mean" in dfm_stats:
+                metrics["dfm_t_mean"] = dfm_stats["t_mean"].item()
+            if "t_min" in dfm_stats:
+                metrics["dfm_t_min"] = dfm_stats["t_min"].item()
+            if "t_max" in dfm_stats:
+                metrics["dfm_t_max"] = dfm_stats["t_max"].item()
+            if "mask_ratio_mean" in dfm_stats:
+                metrics["dfm_mask_ratio_mean"] = dfm_stats["mask_ratio_mean"].item()
+            if "mask_ratio_min" in dfm_stats:
+                metrics["dfm_mask_ratio_min"] = dfm_stats["mask_ratio_min"].item()
+            if "mask_ratio_max" in dfm_stats:
+                metrics["dfm_mask_ratio_max"] = dfm_stats["mask_ratio_max"].item()
+            if "w_min" in dfm_stats:
+                metrics["dfm_w_min"] = dfm_stats["w_min"].item()
+            if "w_max" in dfm_stats:
+                metrics["dfm_w_max"] = dfm_stats["w_max"].item()
     # Compute metrics for continuous action representations (L1 regression | diffusion)
     else:
         # Get last layer hidden states
@@ -799,6 +818,7 @@ def run_validation(
                 dfm_t_max=cfg.dfm_t_max,
                 dfm_loss_mode=cfg.dfm_loss_mode,
                 dfm_weight_clip=cfg.dfm_weight_clip,
+                dfm_train_mode=cfg.dfm_train_mode,
             )
 
             # Add the loss value to the metrics
@@ -1144,8 +1164,16 @@ def finetune(cfg: FinetuneConfig) -> None:
         "dfm_kappa_mean": deque(maxlen=cfg.grad_accumulation_steps),
         "dfm_mask_frac_mean": deque(maxlen=cfg.grad_accumulation_steps),
         "dfm_w_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_w_min": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_w_max": deque(maxlen=cfg.grad_accumulation_steps),
         "dfm_frac_w_clipped": deque(maxlen=cfg.grad_accumulation_steps),
         "dfm_num_supervised_tokens": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_t_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_t_min": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_t_max": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_mask_ratio_mean": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_mask_ratio_min": deque(maxlen=cfg.grad_accumulation_steps),
+        "dfm_mask_ratio_max": deque(maxlen=cfg.grad_accumulation_steps),
     }
 
     # Start training
@@ -1179,6 +1207,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 dfm_t_max=cfg.dfm_t_max,
                 dfm_loss_mode=cfg.dfm_loss_mode,
                 dfm_weight_clip=cfg.dfm_weight_clip,
+                dfm_train_mode=cfg.dfm_train_mode,
             )
 
             # Normalize loss to account for gradient accumulation
