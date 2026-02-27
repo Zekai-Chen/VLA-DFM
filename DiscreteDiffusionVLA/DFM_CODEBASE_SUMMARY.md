@@ -68,13 +68,13 @@ It returns `(final_ids, actions_hidden_states, stats)`.
    - **Model query:** `tokens_to_logits(cur)` → logits and last hidden states.
    - **Temperature:** optional linear anneal (`temperature_anneal == "linear"`).
    - **Sample ids:** multinomial sample from `softmax(logits)` (parallel categorical), with the mask token suppressed if it is in-range. In DFM inference, `tokens_to_logits` additionally hard-masks logits to the action-token vocab range before sampling (see Inference section).
-   - **Hazard:** `kappa(t)` and `kappa_dot(t)` set `hazard = kdot / (1 - kappa)`.
-   - **Step size:** start with `dt_grid[step]`, optionally cap by the “safe” step `(1 - kappa)/kdot`, then clamp to `step_max`, and enforce `step_min` if possible.
-   - **Update probability:** `p_update = 1 - exp(-h * hazard)`, broadcast to `[B, L]`.
-   - **Apply update:** update positions where `rand < p_update` AND sampled id differs AND not clamped AND **unresolved**.
+   - **Decode mode (`decode_mode`)**:
+     - **`ctmc` (default):** uses hazard/tau-leaping updates with `kappa(t)` and `kappa_dot(t)` to compute `p_update`, then updates a random subset of unresolved tokens.
+     - **`maskgit`:** uses `mask_ratio = 1 - kappa(t)` to decide **how many masked tokens remain**, then keeps the **lowest-confidence** tokens masked using a MaskGIT-style `mask_by_random_topk` step. This makes DFM behave like discrete diffusion’s confidence-ordered refinement while preserving the same schedule family.
    - **Per-step stats:** record number of changed tokens; early exit triggers only when unresolved tokens are gone (no early exit on “no changes”).
 4. **Corrector (optional):** if `corrector=True`, re-mask low-confidence tokens and run a short MaskGIT-style decode (see `parallel_decode.decode`).
-5. **Stats:** returns `dfm_nfe_realized`, `dfm_early_exit_iter`, `dfm_dt_safe_hits`, `dfm_dt_under_min`, `dfm_num_changed_tokens`, `dfm_mask_frac_final`, and `dfm_unresolved_final`.
+5. **Final fill (always-on):** after the main loop (and optional corrector), if any unresolved masked tokens remain, run a final logits pass and fill **only those tokens** (mask token still forbidden). This uses the same `tokens_to_logits` closure and respects clamp values. It also mirrors the decode temperature logic (including `temperature_anneal="linear"` forcing temp to `1.0` for the final fill). The `dfm_mask_frac_final` and `dfm_unresolved_final` stats are computed **after** this final fill, so they directly reflect whether any masked tokens still remain.
+6. **Stats:** returns `dfm_nfe_realized`, `dfm_early_exit_iter`, `dfm_dt_safe_hits`, `dfm_dt_under_min`, `dfm_num_changed_tokens`, `dfm_mask_frac_final`, and `dfm_unresolved_final`.
 
 ### DFM Decode Parameters (Summary Table)
 
@@ -95,6 +95,7 @@ It returns `(final_ids, actions_hidden_states, stats)`.
 | `corrector_remask_frac` | `0.1` | Fraction of lowest-confidence tokens to re-mask. |
 | `clamp_mask` | `None` | Boolean mask to freeze positions. |
 | `clamp_values` | `None` | Values to force at clamped positions. |
+| `decode_mode` | `"ctmc"` | DFM decode mode: `ctmc` (hazard/tau-leaping) or `maskgit` (confidence-ordered refinement). |
 
 ---
 
@@ -143,9 +144,8 @@ During multimodal forward:
 
 1. **Action mask extraction:** `all_actions_mask = self._process_action_masks(labels)` identifies the action-token positions.
 2. **DFM branch:** when `self.use_discrete_flow_matching` is true:
-   - `apply_mask_flow_matching(...)` corrupts action tokens according to DFM schedule.
-   - It returns `dfm_loss_mask`, `kappa_t`, `kdot_t`, and masked inputs/labels.
-   - `dfm_weight = (kdot_t / (1 - kappa_t)).clamp(max=dfm_weight_clip)`.
+   - `dfm_train_mode="flow"` (default): `apply_mask_flow_matching(...)` corrupts action tokens according to the DFM schedule and returns `dfm_loss_mask`, `kappa_t`, `kdot_t`, and masked inputs/labels. Weights use `dfm_weight = (kdot_t / (1 - kappa_t)).clamp(max=dfm_weight_clip)`.
+   - `dfm_train_mode="diffusion_like"`: uses `apply_mask_diffusion(...)` and forces `dfm_loss_mode="masked_ce"` with uniform weights. This aligns the corruption and loss with discrete diffusion while keeping the DFM inference path.
 3. **Language model forward:** the masked multimodal sequence is fed through the LLM.
 4. **Loss override:** DFM overrides the standard LM loss using `dfm_loss_mask` and optional weighting.
 
@@ -156,12 +156,14 @@ Key logic:
 - Sample `t ~ Uniform([t_min, t_max])`, clamped into `(eps, 1-eps)`.
 - Compute `kappa_t` and `kdot_t`.
 - Derive mask ratio `mask_ratio = 1 - kappa_t`.
-- Select a per-example number of masked tokens (at least 1).
-- Build `masked_input_ids`, `masked_labels`, `loss_mask`.
+- Select a per-example number of masked tokens (at least 1) based on the mask ratio and available action positions.
+- Build `masked_input_ids`, `masked_labels`, `loss_mask`, and return the sampled `t` for downstream debug stats.
+- Mask selection is done by ranking random scores over maskable positions and taking the lowest `num_mask` per example.
 
 Outputs:
 - `dfm_loss_mask`: float mask (`1` on supervised tokens, `0` elsewhere).
 - `kappa_t`, `kdot_t`: used to weight the loss.
+- `t`: sampled time values per batch (after eps clamp).
 
 ### DFM Loss Computation
 **Location:** `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/extern/hf/modeling_prismatic.py`
@@ -171,10 +173,14 @@ Outputs:
 - Weighting depends on `dfm_loss_mode`:
   - `masked_ce`: weights are all `1` on masked positions.
   - `generalized_kl`: weights are `dfm_weight` expanded over positions.
-- Final loss is `sum(masked_loss) / sum(mask * weight)`.
+- Final loss is `sum(masked_loss) / sum(mask * weight)` where `masked_loss = CE * mask * weight`, so the same weights are applied to both numerator and denominator.
 
 ### Debug and Safeguards
-- Env vars: `VLA_DFM_DEBUG=1` and `VLA_DFM_DEBUG_EVERY` control periodic logging of mask stats.
+- Env vars: `VLA_DFM_DEBUG=1` and `VLA_DFM_DEBUG_EVERY` control periodic logging of mask stats (rank-0 only, every `VLA_DFM_DEBUG_EVERY` steps).
+- When enabled, the DFM debug log includes: supervised action-token counts, per-batch supervised fraction, and **time sampling stats** (`t_mean`, `t_min`, `t_max`), **mask-ratio stats** (`mask_ratio_mean`, `mask_ratio_min`, `mask_ratio_max`), and **weight stats** (`w_mean`, `w_min`, `w_max`).
+- DFM eval debug payloads also include invariants:
+  - `changed_off_action_count`: number of non-action positions altered by DFM decoding (should be `0`).
+  - `stop_token_corrupted`: whether the STOP token differs from the original input (should be `False`).
 - The model raises if both discrete diffusion and DFM are enabled at the same time.
 
 ---
@@ -202,6 +208,8 @@ Outputs:
 3. Apply clamp logic if `dfm_clamp_mask` or `dfm_clamp_values` are provided.
 4. Call `dfm_decode(...)` with CTMC parameters.
 5. Convert final token ids to discrete action bins, then to normalized actions.
+
+`dfm_decode_mode` controls whether DFM uses CTMC updates (`ctmc`) or MaskGIT-style confidence-ordered refinement (`maskgit`).
 
 ### Clamp and Early Exit Behavior
 - If `dfm_clamp_values` is set, tokens are forced to those values at clamped positions.
@@ -239,6 +247,7 @@ Important DFM fields in `FinetuneConfig`:
 - `dfm_t_min`, `dfm_t_max`
 - `dfm_loss_mode` (`generalized_kl` or `masked_ce`)
 - `dfm_weight_clip`
+- `dfm_train_mode` (`flow` or `diffusion_like`)
 
 ### Scripts and CLI Flags
 
@@ -261,6 +270,7 @@ These pass:
 - `dfm_early_exit`, `dfm_early_exit_frac`
 - `dfm_corrector`, `dfm_corrector_iters`, `dfm_corrector_remask_frac`
 - `dfm_clamp_mask`, `dfm_clamp_values`
+- `dfm_decode_mode` (`ctmc` | `maskgit`)
 
 ### Mutual-Exclusion Constraints
 - Discrete diffusion and DFM are mutually exclusive; the model raises if both are enabled.
@@ -282,6 +292,16 @@ Returned stats dictionary includes:
 - `dfm_mask_frac_final`: fraction of tokens still equal to `mask_token_id` at the end (should be near 0 when decoding succeeds).
 - `dfm_unresolved_final`: count of unresolved (masked) tokens at the end.
 - `dfm_in_action_frac_final`: fraction of decoded tokens that fall inside the action-token vocab range (should be ~1.0 with action-vocab masking).
+
+### Training-Time DFM Stats (Forward Pass)
+**File:** `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/extern/hf/modeling_prismatic.py`
+
+When DFM is enabled during training, the forward pass emits additional `dfm_stats` entries for debugging coverage and weighting:
+- `t_mean`, `t_min`, `t_max`: sampled time statistics (after clamping to `(eps, 1-eps)`).
+- `mask_ratio_mean`, `mask_ratio_min`, `mask_ratio_max`: per-batch mask ratio derived from `1 - kappa(t)`.
+- `w_mean`, `w_min`, `w_max`: loss-weight statistics for the hazard-weighted objective (after clipping by `dfm_weight_clip`).
+
+These are training-time diagnostics (not decode stats) and are intended to verify that the model is seeing high-mask regimes and that weights are well behaved.
 
 ### Unit Tests
 - `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/tests/test_dfm_decode.py`
@@ -328,11 +348,11 @@ Top-level directories and their purpose:
 
 | Area | File | Responsibility |
 | --- | --- | --- |
-| DFM Decode | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/discrete_flow/dfm_decode.py` | CTMC hazard / tau-leaping decoder; updates only masked tokens and suppresses mask-token sampling, with adaptive step, clamp, and corrector. |
+| DFM Decode | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/discrete_flow/dfm_decode.py` | CTMC hazard / tau-leaping decoder with optional `maskgit` decode mode; updates only masked tokens and suppresses mask-token sampling, with adaptive step, clamp, corrector, and a final-fill pass to resolve any remaining masks. |
 | DFM Schedule | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/discrete_flow/dfm_schedule.py` | `kappa`, `kappa_dot`, `time_grid` schedule definitions. |
 | MaskGIT | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/discrete_flow/parallel_decode.py` | Parallel decode for optional corrector stage. |
 | Mask Schedule | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/discrete_flow/mask_schedule.py` | Masking ratio schedules used by MaskGIT. |
-| Training Integration | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/extern/hf/modeling_prismatic.py` | DFM masking, weighting, loss override, prediction path, action-vocab masking, in-action telemetry, and mask-token collision warning in DFM inference. |
+| Training Integration | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/extern/hf/modeling_prismatic.py` | DFM masking, weighting, loss override, prediction path, action-vocab masking, in-action telemetry, mask-token collision warning, training-time DFM debug stats (t / mask-ratio / weight ranges), and `dfm_train_mode` for diffusion-like masking. |
 | Model Config | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/prismatic/extern/hf/configuration_prismatic.py` | DFM flags in model config and setters. |
 | Finetune CLI | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/vla-scripts/finetune.py` | Training config for DFM and run-time flags. |
 | DFM Training Script | `/Users/ali/dev/VLA-DFM/DiscreteDiffusionVLA/train_dfm_slurm.sh` | Example SLURM launch with DFM hyperparameters. |
