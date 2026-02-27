@@ -726,6 +726,7 @@ def get_vla_action(
     use_discrete_flow_matching: bool = False,
     return_debug: bool = False,
     dfm_debug_level: int = 1,
+    dfm_decode_mode: str = "ctmc",
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -845,6 +846,7 @@ def get_vla_action(
                     dfm_clamp_values=clamp_values,
                     return_debug=True,
                     dfm_debug_level=dfm_debug_level,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
             else:
                 action, _ = vla.predict_action(
@@ -873,6 +875,7 @@ def get_vla_action(
                     dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
                     dfm_clamp_mask=clamp_mask,
                     dfm_clamp_values=clamp_values,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
         else:
             # Custom action head for continuous actions
@@ -905,6 +908,7 @@ def get_vla_action(
                     dfm_clamp_values=clamp_values,
                     return_debug=True,
                     dfm_debug_level=dfm_debug_level,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
             else:
                 action, _ = vla.predict_action(
@@ -933,6 +937,7 @@ def get_vla_action(
                     dfm_corrector_remask_frac=getattr(cfg, "dfm_corrector_remask_frac", 0.1),
                     dfm_clamp_mask=clamp_mask,
                     dfm_clamp_values=clamp_values,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
 
     # Return action chunk as list of actions

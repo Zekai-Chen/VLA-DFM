@@ -111,6 +111,7 @@ class GenerateConfig:
     dfm_corrector_remask_frac: float = 0.1           # Remask fraction in corrector
     dfm_clamp_mask: bool = False                     # Clamp non-mask tokens during CTMC
     dfm_clamp_values: Optional[str] = None           # Optional clamp values spec/path
+    dfm_decode_mode: str = "ctmc"                    # DFM decode mode: ctmc | maskgit
 
     # DFM debug / tracing
     dfm_debug: bool = False                          # If True, emit per-chunk debug payloads
@@ -384,6 +385,7 @@ def run_episode(
 
             # If action queue is empty, requery model
             if len(action_queue) == 0:
+                debug = None
                 # Query model to get action
                 if cfg.dfm_debug and cfg.use_discrete_flow_matching:
                     actions, debug = get_action(
@@ -400,6 +402,7 @@ def run_episode(
                         use_discrete_flow_matching=cfg.use_discrete_flow_matching,
                         return_debug=True,
                         dfm_debug_level=cfg.dfm_debug_level,
+                        dfm_decode_mode=cfg.dfm_decode_mode,
                     )
                     if debug_writer is not None:
                         debug_writer.write(
@@ -442,6 +445,7 @@ def run_episode(
                         use_film=cfg.use_film,
                         use_discrete_diffusion=cfg.use_discrete_diffusion,
                         use_discrete_flow_matching=cfg.use_discrete_flow_matching,
+                        dfm_decode_mode=cfg.dfm_decode_mode,
                     )
                 chunk_idx += 1
                 if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
@@ -461,6 +465,13 @@ def run_episode(
                     in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
                     if in_action_frac is not None:
                         log_payload["DFM/InActionFracFinal"] = in_action_frac
+                    if debug is not None:
+                        changed_off = debug.get("changed_off_action_count")
+                        if changed_off is not None:
+                            log_payload["DFM/ChangedOffActionCount"] = changed_off
+                        stop_corrupted = debug.get("stop_token_corrupted")
+                        if stop_corrupted is not None:
+                            log_payload["DFM/StopTokenCorrupted"] = float(stop_corrupted)
                     wandb.log(log_payload)
                 action_queue.extend(actions)
 

@@ -110,6 +110,7 @@ def get_action(
     use_discrete_flow_matching: bool = False,
     return_debug: bool = False,
     dfm_debug_level: int = 1,
+    dfm_decode_mode: str = "ctmc",
 ) -> Union[List[np.ndarray], np.ndarray]:
     """
     Query the model to get action predictions.
@@ -149,6 +150,7 @@ def get_action(
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     return_debug=True,
                     dfm_debug_level=dfm_debug_level,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
             else:
                 action = get_vla_action(
@@ -163,6 +165,7 @@ def get_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
+                    dfm_decode_mode=dfm_decode_mode,
                 )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")
