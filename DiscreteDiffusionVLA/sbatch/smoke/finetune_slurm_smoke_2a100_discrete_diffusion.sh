@@ -77,9 +77,9 @@ RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke"
 # --- Training params (short) ---
 BATCH_SIZE=2
 LEARNING_RATE=5e-4
-NUM_STEPS_BEFORE_DECAY=100
-MAX_STEPS=200
-SAVE_FREQ=50
+NUM_STEPS_BEFORE_DECAY=10000
+MAX_STEPS=20000
+SAVE_FREQ=10000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
@@ -102,8 +102,8 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --data_root_dir "${DATA_ROOT}" \
     --dataset_name "${DATASET_NAME}" \
     --run_root_dir "${RUN_ROOT_DIR}" \
-    --use_discrete_diffusion False \
-    --use_discrete_flow_matching True \
+    --use_discrete_diffusion True \
+    --use_discrete_flow_matching False \
     --use_l1_regression False \
     --use_diffusion False \
     --use_film False \
