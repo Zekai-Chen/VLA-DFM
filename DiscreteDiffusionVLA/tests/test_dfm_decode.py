@@ -61,3 +61,25 @@ def test_dfm_decode_stats_bounds():
     assert final_ids.shape == init_ids.shape
     assert stats["dfm_nfe_realized"] <= 4
     assert isinstance(stats["dfm_num_changed_tokens"], list)
+
+
+def test_dfm_decode_maskgit_mode():
+    init_ids = torch.zeros(1, 5, dtype=torch.long)
+    final_ids, _, stats = dfm_decode(
+        init_ids=init_ids,
+        tokens_to_logits=_dummy_tokens_to_logits,
+        mask_token_id=0,
+        num_steps=3,
+        schedule="cosine",
+        temperature=1.0,
+        adaptive_step=True,
+        step_min=1e-4,
+        step_max=0.5,
+        time_eps=1e-3,
+        early_exit=False,
+        decode_mode="maskgit",
+    )
+
+    assert final_ids.shape == init_ids.shape
+    assert "dfm_nfe_realized" in stats
+    assert isinstance(stats["dfm_num_changed_tokens"], list)
