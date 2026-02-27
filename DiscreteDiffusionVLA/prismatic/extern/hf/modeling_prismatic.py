@@ -846,6 +846,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 loss_mask_full = all_actions_mask
                 dfm_action_token_count = loss_mask_full.sum(dim=1)
                 if dfm_train_mode == "diffusion_like":
+                    eos_pos = self._get_eos_pos(all_actions_mask)  # (B,)
                     (
                         input_ids,
                         input_embeddings,
@@ -865,6 +866,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     dfm_weight = torch.ones_like(kappa_t)
                     dfm_t = None
                     dfm_loss_mode = "masked_ce"
+                    # Supervise STOP/EOS to match discrete diffusion semantics.
+                    labels[torch.arange(labels.shape[0]), eos_pos] = STOP_INDEX
+                    dfm_loss_mask[torch.arange(dfm_loss_mask.shape[0]), eos_pos] = 1.0
                 else:
                     (
                         input_ids,
@@ -1000,16 +1004,6 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # Override loss for DFM if applicable
         lm_loss = language_model_output.loss
         if self.use_discrete_flow_matching and (dfm_loss_mask is not None):
-            logits = language_model_output.logits
-            vocab_size = logits.shape[-1]
-            # Compute per-token CE loss over multimodal labels
-            token_losses = torch.nn.functional.cross_entropy(
-                logits.view(-1, vocab_size),
-                multimodal_labels.view(-1),
-                reduction="none",
-                ignore_index=IGNORE_INDEX,
-            ).view(multimodal_labels.shape)
-
             # Align loss mask with multimodal sequence (insert patch positions)
             patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
             if patch_len > 0:
@@ -1020,16 +1014,32 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             else:
                 multimodal_loss_mask = dfm_loss_mask
 
-            if dfm_loss_mode == "masked_ce":
-                weight = torch.ones_like(multimodal_loss_mask)
-            else:
-                weight = dfm_weight.view(-1, 1).expand_as(multimodal_loss_mask)
+            skip_dfm_loss_override = dfm_train_mode == "diffusion_like"
+            if not skip_dfm_loss_override:
+                logits = language_model_output.logits
+                vocab_size = logits.shape[-1]
+                # Shift for causal LM loss
+                shift_logits = logits[:, :-1, :]
+                shift_labels = multimodal_labels[:, 1:]
+                shift_loss_mask = multimodal_loss_mask[:, 1:]
 
-            masked_loss = token_losses * multimodal_loss_mask * weight
-            denom = (multimodal_loss_mask * weight).sum().clamp(min=1.0)
-            lm_loss = masked_loss.sum() / denom
+                token_losses = torch.nn.functional.cross_entropy(
+                    shift_logits.reshape(-1, vocab_size),
+                    shift_labels.reshape(-1),
+                    reduction="none",
+                    ignore_index=IGNORE_INDEX,
+                ).view(shift_labels.shape)
 
-            # DFM stats for logging
+                if dfm_loss_mode == "masked_ce":
+                    weight = torch.ones_like(shift_loss_mask)
+                else:
+                    weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+
+                masked_loss = token_losses * shift_loss_mask * weight
+                denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
+                lm_loss = masked_loss.sum() / denom
+
+            # DFM stats for logging (both diffusion_like + flow)
             with torch.no_grad():
                 if dfm_action_token_count is None:
                     mask_frac = multimodal_loss_mask.sum(dim=1) / multimodal_loss_mask.shape[1]
@@ -1051,6 +1061,44 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     "frac_w_clipped": (dfm_weight >= dfm_weight_clip).float().mean().detach(),
                     "num_supervised_tokens": dfm_loss_mask.sum().detach(),
                 }
+
+            # Debug loss parity check (optional)
+            if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
+                debug_every = int(os.environ.get("VLA_DFM_DEBUG_EVERY", "200"))
+                debug_step = getattr(self, "_dfm_debug_step", 0)
+                if debug_step % debug_every == 0:
+                    is_rank0 = (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+                    if is_rank0:
+                        with torch.no_grad():
+                            hf_loss = language_model_output.loss.detach()
+                            if skip_dfm_loss_override:
+                                # Compute debug-only DFM loss with shifted tensors (no grad)
+                                logits = language_model_output.logits
+                                vocab_size = logits.shape[-1]
+                                shift_logits = logits[:, :-1, :]
+                                shift_labels = multimodal_labels[:, 1:]
+                                shift_loss_mask = multimodal_loss_mask[:, 1:]
+                                token_losses = torch.nn.functional.cross_entropy(
+                                    shift_logits.reshape(-1, vocab_size),
+                                    shift_labels.reshape(-1),
+                                    reduction="none",
+                                    ignore_index=IGNORE_INDEX,
+                                ).view(shift_labels.shape)
+                                if dfm_loss_mode == "masked_ce":
+                                    weight = torch.ones_like(shift_loss_mask)
+                                else:
+                                    weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+                                masked_loss = token_losses * shift_loss_mask * weight
+                                denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
+                                dfm_loss_check = masked_loss.sum() / denom
+                            else:
+                                dfm_loss_check = lm_loss.detach()
+                            logger.info(
+                                "[DFM DEBUG] hf_loss=%.6f dfm_loss_check=%.6f skip_dfm_loss_override=%s",
+                                hf_loss.item(),
+                                dfm_loss_check.item(),
+                                str(skip_dfm_loss_override),
+                            )
 
         return PrismaticCausalLMOutputWithPast(
             loss=lm_loss,
