@@ -59,7 +59,8 @@ class RLDSBatchTransform:
         # Get action chunk string
         current_action_string = self.action_tokenizer(current_action)
         action_chunk_string = current_action_string + future_actions_string
-        action_chunk_len = len(action_chunk_string)
+        action_chunk_ids = self.base_tokenizer(action_chunk_string, add_special_tokens=False).input_ids
+        action_chunk_len = len(action_chunk_ids)
 
         conversation = [
             {"from": "human", "value": f"What action should the robot take to {lang}?"},
@@ -265,6 +266,7 @@ class DummyDataset(Dataset):
         pixel_values = self.image_transform(image)
 
         # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        labels[: -(len(action) + 1)] = IGNORE_INDEX
+        action_ids = self.base_tokenizer(self.action_tokenizer(action), add_special_tokens=False).input_ids
+        labels[: -(len(action_ids) + 1)] = IGNORE_INDEX
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
