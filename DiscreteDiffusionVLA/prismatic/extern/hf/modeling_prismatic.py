@@ -1035,6 +1035,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                                 supervised_in_action = supervised_mask & action_mask
                                 supervised_outside_action = supervised_mask & (~action_mask)
                                 action_count = action_mask.sum().item()
+                                expected_action_count = ACTION_DIM * NUM_ACTIONS_CHUNK
+                                per_sample_action_count = action_mask.sum(dim=1)
+                                mismatch_mask = per_sample_action_count != expected_action_count
+                                if mismatch_mask.any():
+                                    mismatch_idx = mismatch_mask.nonzero(as_tuple=False).flatten()[:5]
+                                    logger.warning(
+                                        "[DFM DEBUG] action token count mismatch expected=%d counts=%s idx=%s",
+                                        expected_action_count,
+                                        per_sample_action_count[mismatch_idx].tolist(),
+                                        mismatch_idx.tolist(),
+                                    )
                                 supervised_count = supervised_in_action.sum().item()
                                 outside_count = supervised_outside_action.sum().item()
                                 supervised_frac = supervised_count / max(action_count, 1)
