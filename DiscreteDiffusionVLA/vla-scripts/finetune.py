@@ -386,8 +386,12 @@ def run_forward_pass(
     if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
-    current_action_mask = get_current_action_mask(ground_truth_token_ids)
-    next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+    current_action_mask = get_current_action_mask(
+        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+    )
+    next_actions_mask = get_next_actions_mask(
+        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+    )
 
     # Compute metrics for discrete action representation (next-token prediction)
     if not (use_l1_regression or use_diffusion):
@@ -453,8 +457,12 @@ def run_forward_pass(
         if use_discrete_diffusion:
             # reset action mask to get correct hidden states for action portion
             ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-            current_action_mask = get_current_action_mask(ground_truth_token_ids)
-            next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+            current_action_mask = get_current_action_mask(
+                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+            )
+            next_actions_mask = get_next_actions_mask(
+                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+            )
 
         actions_hidden_states = (
             text_hidden_states[current_action_mask | next_actions_mask]
