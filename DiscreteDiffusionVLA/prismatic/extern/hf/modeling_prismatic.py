@@ -559,6 +559,35 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             return torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
         return None
 
+    @staticmethod
+    def _build_multimodal_token_ids(token_ids, projected_patch_embeddings, patch_fill_id: int = 0):
+        """Build multimodal token IDs with patch fill tokens inserted after BOS."""
+        if token_ids is None:
+            return None
+        patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
+        if patch_len > 0:
+            patch_ids = torch.full(
+                (token_ids.shape[0], patch_len),
+                fill_value=patch_fill_id,
+                dtype=token_ids.dtype,
+                device=token_ids.device,
+            )
+            return torch.cat([token_ids[:, :1], patch_ids, token_ids[:, 1:]], dim=1)
+        return token_ids
+
+    @staticmethod
+    def _expand_mask_with_patches(mask, projected_patch_embeddings):
+        """Expand a (B, L) mask to include patch positions after BOS."""
+        if mask is None:
+            return None
+        patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
+        if patch_len > 0:
+            patch_mask = torch.zeros(
+                (mask.shape[0], patch_len), device=mask.device, dtype=mask.dtype
+            )
+            return torch.cat([mask[:, :1], patch_mask, mask[:, 1:]], dim=1)
+        return mask
+
     def _get_eos_pos(self, all_actions_mask):
         """Prepare loss mask for discrete diffusion"""
         loss_mask_full = all_actions_mask.clone()  # (B, seq_len)
@@ -769,6 +798,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_stats = None
         dfm_action_token_count = None
         dfm_t = None
+        multimodal_x1_labels = None
+        multimodal_xt_ids = None
+        multimodal_actions_mask = None
 
         # Resolve DFM defaults
         dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
@@ -879,6 +911,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 labels[torch.arange(labels.shape[0]), eos_pos] = STOP_INDEX
 
             elif self.use_discrete_flow_matching:
+                labels_x1 = labels.clone() if labels is not None else None
                 loss_mask_full = all_actions_mask
                 dfm_action_token_count = loss_mask_full.sum(dim=1)
                 if dfm_train_mode == "diffusion_like":
@@ -999,6 +1032,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
             # Build labels for multimodal sequence if needed  # labels shape [8, 93]
             multimodal_labels = self._build_multimodal_labels(labels, projected_patch_embeddings)
+            if self.use_discrete_flow_matching and labels_x1 is not None:
+                multimodal_x1_labels = self._build_multimodal_labels(labels_x1, projected_patch_embeddings)
+                multimodal_xt_ids = self._build_multimodal_token_ids(
+                    input_ids, projected_patch_embeddings, patch_fill_id=0
+                )
+                multimodal_actions_mask = self._expand_mask_with_patches(all_actions_mask, projected_patch_embeddings)
+                if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
+                    if multimodal_x1_labels is not None and multimodal_xt_ids is not None:
+                        assert (
+                            multimodal_x1_labels.shape == multimodal_xt_ids.shape == multimodal_actions_mask.shape
+                        ), "DFM multimodal tensors are misaligned."
 
             # Dispatch to language model
             language_model_output = self.language_model(
