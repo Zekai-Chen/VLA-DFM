@@ -751,6 +751,51 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask, kappa_t, kdot_t, t
 
+    @staticmethod
+    def _dfm_generalized_kl_loss(
+        *,
+        shift_logits: torch.Tensor,          # (B, T-1, V_full)
+        x1: torch.Tensor,                    # (B, T-1)
+        xt: torch.Tensor,                    # (B, T-1)
+        action_mask: torch.Tensor,           # (B, T-1)
+        kappa_t: torch.Tensor,               # (B,)
+        kdot_t: torch.Tensor,                # (B,)
+        action_begin: int,
+        action_end: int,
+        mask_id: int,
+        weight_clip: float = 20.0,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """Generalized-KL loss for mixture path on action coordinates."""
+        B, _, _ = shift_logits.shape
+        am = action_mask.bool()
+
+        action_ids = torch.arange(action_begin, action_end, device=shift_logits.device)
+        allowed_ids = torch.cat([action_ids, torch.tensor([mask_id], device=shift_logits.device)], dim=0)
+        K = allowed_ids.numel()
+
+        logits = shift_logits.index_select(dim=-1, index=allowed_ids)
+
+        x1_safe = torch.where(am, x1, torch.full_like(x1, action_begin))
+        xt_safe = torch.where(am, xt, torch.full_like(xt, action_begin))
+
+        x1_idx = x1_safe - action_begin
+        xt_idx = torch.where(xt_safe == mask_id, torch.full_like(xt_safe, K - 1), xt_safe - action_begin)
+
+        log_p = torch.log_softmax(logits, dim=-1)
+        log_p_x1 = log_p.gather(-1, x1_idx.unsqueeze(-1)).squeeze(-1)
+        log_p_xt = log_p.gather(-1, xt_idx.unsqueeze(-1)).squeeze(-1)
+        p_xt = torch.exp(log_p_xt)
+
+        delta = (xt_safe == x1_safe).to(log_p.dtype)
+
+        denom = (1.0 - kappa_t).clamp(min=eps)
+        w = (kdot_t / denom).clamp(min=0.0, max=weight_clip).view(B, 1)
+
+        loss_pos = -w * (p_xt - delta + (1.0 - delta) * log_p_x1)
+
+        return (loss_pos * am).sum() / am.sum().clamp(min=1.0)
+
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
         self,
@@ -1097,27 +1142,51 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             skip_dfm_loss_override = dfm_train_mode == "diffusion_like"
             if not skip_dfm_loss_override:
                 logits = language_model_output.logits
-                vocab_size = logits.shape[-1]
                 # Shift for causal LM loss
                 shift_logits = logits[:, :-1, :]
-                shift_labels = multimodal_labels[:, 1:]
-                shift_loss_mask = multimodal_loss_mask[:, 1:]
-
-                token_losses = torch.nn.functional.cross_entropy(
-                    shift_logits.reshape(-1, vocab_size),
-                    shift_labels.reshape(-1),
-                    reduction="none",
-                    ignore_index=IGNORE_INDEX,
-                ).view(shift_labels.shape)
-
-                if dfm_loss_mode == "masked_ce":
-                    weight = torch.ones_like(shift_loss_mask)
+                if dfm_loss_mode == "generalized_kl":
+                    if multimodal_x1_labels is None or multimodal_xt_ids is None or multimodal_actions_mask is None:
+                        raise ValueError("Missing multimodal bookkeeping for generalized_kl loss.")
+                    x1 = multimodal_x1_labels[:, 1:]
+                    xt = multimodal_xt_ids[:, 1:]
+                    am = multimodal_actions_mask[:, 1:]
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    if action_begin <= self.mask_token_id < action_end:
+                        raise ValueError(
+                            "mask_token_id overlaps action vocab range; generalized_kl requires distinct mask token."
+                        )
+                    lm_loss = self._dfm_generalized_kl_loss(
+                        shift_logits=shift_logits,
+                        x1=x1,
+                        xt=xt,
+                        action_mask=am,
+                        kappa_t=kappa_t,
+                        kdot_t=kdot_t,
+                        action_begin=action_begin,
+                        action_end=action_end,
+                        mask_id=self.mask_token_id,
+                        weight_clip=dfm_weight_clip,
+                    )
                 else:
-                    weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+                    vocab_size = logits.shape[-1]
+                    shift_labels = multimodal_labels[:, 1:]
+                    shift_loss_mask = multimodal_loss_mask[:, 1:]
 
-                masked_loss = token_losses * shift_loss_mask * weight
-                denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
-                lm_loss = masked_loss.sum() / denom
+                    token_losses = torch.nn.functional.cross_entropy(
+                        shift_logits.reshape(-1, vocab_size),
+                        shift_labels.reshape(-1),
+                        reduction="none",
+                        ignore_index=IGNORE_INDEX,
+                    ).view(shift_labels.shape)
+
+                    if dfm_loss_mode == "masked_ce":
+                        weight = torch.ones_like(shift_loss_mask)
+                    else:
+                        weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+
+                    masked_loss = token_losses * shift_loss_mask * weight
+                    denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
+                    lm_loss = masked_loss.sum() / denom
 
             # DFM stats for logging (both diffusion_like + flow)
             with torch.no_grad():
@@ -1141,6 +1210,53 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     "frac_w_clipped": (dfm_weight >= dfm_weight_clip).float().mean().detach(),
                     "num_supervised_tokens": dfm_loss_mask.sum().detach(),
                 }
+                if dfm_loss_mode == "generalized_kl" and multimodal_x1_labels is not None:
+                    shift_logits = language_model_output.logits[:, :-1, :]
+                    shift_x1 = multimodal_x1_labels[:, 1:]
+                    shift_xt = multimodal_xt_ids[:, 1:]
+                    shift_am = multimodal_actions_mask[:, 1:].bool()
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    action_ids = torch.arange(action_begin, action_end, device=shift_logits.device)
+                    allowed_ids = torch.cat(
+                        [action_ids, torch.tensor([self.mask_token_id], device=shift_logits.device)], dim=0
+                    )
+                    K = allowed_ids.numel()
+                    logits = shift_logits.index_select(dim=-1, index=allowed_ids)
+                    log_p = torch.log_softmax(logits, dim=-1)
+                    x1_idx = torch.where(
+                        shift_am, shift_x1 - action_begin, torch.zeros_like(shift_x1)
+                    )
+                    xt_idx = torch.where(
+                        shift_am,
+                        torch.where(
+                            shift_xt == self.mask_token_id,
+                            torch.full_like(shift_xt, K - 1),
+                            shift_xt - action_begin,
+                        ),
+                        torch.zeros_like(shift_xt),
+                    )
+                    log_p_x1 = log_p.gather(-1, x1_idx.unsqueeze(-1)).squeeze(-1)
+                    log_p_xt = log_p.gather(-1, xt_idx.unsqueeze(-1)).squeeze(-1)
+                    p_xt = torch.exp(log_p_xt)
+                    masked_xt = shift_xt == self.mask_token_id
+                    denom = shift_am.sum().clamp(min=1.0)
+                    frac_same = ((shift_xt == shift_x1) & shift_am).sum().float() / denom
+                    mean_logp_x1_masked = (
+                        log_p_x1[shift_am & masked_xt].mean() if (shift_am & masked_xt).any() else torch.tensor(0.0)
+                    )
+                    mean_p_xt_masked = (
+                        p_xt[shift_am & masked_xt].mean() if (shift_am & masked_xt).any() else torch.tensor(0.0)
+                    )
+                    jump_coeff = (kdot_t / (1.0 - kappa_t).clamp(min=1e-8)).clamp(max=dfm_weight_clip)
+                    dfm_stats.update(
+                        {
+                            "frac_same": frac_same.detach(),
+                            "jump_coeff_mean": jump_coeff.mean().detach(),
+                            "jump_coeff_p95": torch.quantile(jump_coeff, 0.95).detach(),
+                            "mean_logp_x1_masked": mean_logp_x1_masked.detach(),
+                            "mean_p_xt_masked": mean_p_xt_masked.detach(),
+                        }
+                    )
 
             # Debug loss parity check (optional)
             if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
