@@ -88,12 +88,13 @@ TORCH_DTYPE="bfloat16"
 
 # --- DFM params ---
 USE_DFM=true
-DFM_SCHEDULE="cosine"
+DFM_SCHEDULE="sin"
 DFM_LOSS_MODE="generalized_kl"
 DFM_TIME_EPS=1e-3
 DFM_T_MIN=0.0
-DFM_T_MAX=1.0
+DFM_T_MAX=0.999
 DFM_WEIGHT_CLIP=20.0
+DFM_TRAIN_MODE="flow"
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
 
@@ -128,6 +129,7 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_t_min ${DFM_T_MIN} \
     --dfm_t_max ${DFM_T_MAX} \
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
+    --dfm_train_mode ${DFM_TRAIN_MODE} \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
     --run_id_note "smoke-2xA100--$(date +%Y%m%d_%H%M)" \
