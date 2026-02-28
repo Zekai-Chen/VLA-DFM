@@ -87,6 +87,13 @@ class ActionTokenizer:
 
         return self.bin_centers[discretized_actions]
 
+    def encode_actions_to_token_ids(self, action: np.ndarray) -> np.ndarray:
+        """Discretize continuous actions and return token IDs directly."""
+        action = np.clip(action, a_min=float(self.min_action), a_max=float(self.max_action))
+        discretized_action = np.digitize(action, self.bins)
+        token_ids = self.action_token_end_idx - discretized_action
+        return np.asarray(token_ids, dtype=np.int64).reshape(-1)
+
     @property
     def vocab_size(self) -> int:
         return self.n_bins

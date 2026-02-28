@@ -499,6 +499,21 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
         return all_actions_mask
 
+    def _compute_language_embeddings(self, input_embeddings, attention_mask, all_actions_mask):
+        """Compute a safe language embedding summary for FiLM conditioning."""
+        if attention_mask is None:
+            attention_mask = input_embeddings.new_ones(input_embeddings.shape[:2], dtype=torch.bool)
+        else:
+            attention_mask = attention_mask.to(dtype=torch.bool)
+
+        language_mask = attention_mask & (~all_actions_mask)
+        if not torch.any(language_mask):
+            return input_embeddings.new_zeros((input_embeddings.shape[0], 1, input_embeddings.shape[2]))
+
+        denom = language_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+        summed = (input_embeddings * language_mask.unsqueeze(-1)).sum(dim=1)
+        return (summed / denom).unsqueeze(1)
+
     def _process_vision_features(self, pixel_values, language_embeddings=None, use_film=False):
         """Process vision features with optional FiLM conditioning"""
         if use_film:
@@ -899,10 +914,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             # Extract action masks
             all_actions_mask = self._process_action_masks(labels)
 
-            # Extract the language portion of the input embeddings (i.e. remove the action tokens portion)
-            language_embeddings = input_embeddings[~all_actions_mask].reshape(
-                input_embeddings.shape[0], -1, input_embeddings.shape[2]
-            )  # (B, lang_seq_len, llm_dim)
+            # Extract a safe language summary for FiLM conditioning
+            language_embeddings = None
+            if use_film:
+                language_embeddings = self._compute_language_embeddings(
+                    input_embeddings, attention_mask, all_actions_mask
+                )  # (B, 1, llm_dim)
 
             # Get visual features  pixel_values [8, 12, 224, 224]
             projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -1986,10 +2003,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
 
-        # Extract language embeddings
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )
+        # Extract a safe language summary for FiLM conditioning
+        language_embeddings = None
+        if use_film:
+            language_embeddings = self._compute_language_embeddings(
+                input_embeddings, attention_mask, all_actions_mask
+            )  # (B, 1, llm_dim)
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -2408,10 +2427,12 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
 
-        # Extract language embeddings
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )
+        # Extract a safe language summary for FiLM conditioning
+        language_embeddings = None
+        if use_film:
+            language_embeddings = self._compute_language_embeddings(
+                input_embeddings, attention_mask, all_actions_mask
+            )  # (B, 1, llm_dim)
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
