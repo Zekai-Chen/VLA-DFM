@@ -10,6 +10,8 @@ def kappa(t: torch.Tensor, schedule: str = "cosine") -> torch.Tensor:
     """Compute kappa(t) for a given schedule. t in [0, 1]."""
     if schedule == "cosine":
         return 1.0 - torch.cos(0.5 * math.pi * t)
+    if schedule == "sin":
+        return torch.sin(0.5 * math.pi * t)
     if schedule == "linear":
         return t
     if schedule == "poly2":
@@ -21,6 +23,8 @@ def kappa_dot(t: torch.Tensor, schedule: str = "cosine") -> torch.Tensor:
     """Compute derivative of kappa(t)."""
     if schedule == "cosine":
         return 0.5 * math.pi * torch.sin(0.5 * math.pi * t)
+    if schedule == "sin":
+        return 0.5 * math.pi * torch.cos(0.5 * math.pi * t)
     if schedule == "linear":
         return torch.ones_like(t)
     if schedule == "poly2":

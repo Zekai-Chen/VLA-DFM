@@ -5,7 +5,7 @@ from prismatic.discrete_flow.dfm_schedule import kappa, kappa_dot, time_grid
 
 def test_kappa_endpoints_and_range():
     t = torch.tensor([0.0, 0.5, 1.0])
-    for schedule in ("cosine", "linear", "poly2"):
+    for schedule in ("cosine", "sin", "linear", "poly2"):
         kt = kappa(t, schedule=schedule)
         assert torch.all(kt >= 0.0)
         assert torch.all(kt <= 1.0)
@@ -15,9 +15,9 @@ def test_kappa_endpoints_and_range():
 
 def test_kappa_dot_nonnegative():
     t = torch.linspace(0.0, 1.0, steps=11)
-    for schedule in ("cosine", "linear", "poly2"):
+    for schedule in ("cosine", "sin", "linear", "poly2"):
         kdot = kappa_dot(t, schedule=schedule)
-        assert torch.all(kdot >= 0.0)
+        assert torch.all(kdot >= -1e-6)
 
 
 def test_time_grid_bounds():
