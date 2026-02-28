@@ -671,6 +671,13 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask
 
+    @staticmethod
+    def _sample_mixture_mask(loss_mask_full: torch.BoolTensor, kappa_t: torch.Tensor) -> torch.BoolTensor:
+        """Sample per-coordinate Bernoulli mask for mixture path corruption."""
+        p_mask = (1.0 - kappa_t).view(-1, 1)  # (B, 1)
+        rand = torch.rand(loss_mask_full.shape, device=loss_mask_full.device)
+        return (rand < p_mask) & loss_mask_full
+
     def apply_mask_flow_matching(
         self,
         input_ids: torch.LongTensor,                 # (B, L)
@@ -690,8 +697,6 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         B, L = input_ids.shape
         device = input_ids.device
 
-        total_unknown = loss_mask_full.float().sum(dim=1)  # (B,)
-
         # Sample time t in [t_min, t_max], clamped to (eps, 1-eps)
         t_low = max(t_min, time_eps)
         t_high = min(t_max, 1.0 - time_eps)
@@ -701,16 +706,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         kappa_t = kappa(t, schedule=schedule)
         kdot_t = kappa_dot(t, schedule=schedule)
 
-        mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
-        num_mask = torch.clamp((total_unknown * mask_ratio).round(), min=1).long()
-
-        # Random scores for masking selection
-        vals = torch.rand(B, L, device=device)
-        large = float("inf")
-        vals = torch.where(loss_mask_full, vals, vals + large)
-        perm = vals.argsort(dim=1)
-        ranks = perm.argsort(dim=1)
-        masked_mask = ranks < num_mask[:, None]
+        masked_mask = self._sample_mixture_mask(loss_mask_full, kappa_t)
 
         ignore_labels = torch.full_like(labels, fill_value=IGNORE_INDEX, dtype=labels.dtype, device=device)
         masked_labels = torch.where(masked_mask, labels, ignore_labels)
