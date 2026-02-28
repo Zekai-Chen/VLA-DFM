@@ -4,7 +4,7 @@ action_tokenizer.py
 Extension class; wraps base LLM/VLM tokenizer with logic to discretize and tokenize continuous robot actions.
 """
 
-from typing import List, Union
+from typing import List, Optional, Union
 
 import numpy as np
 from transformers import PreTrainedTokenizerBase
@@ -12,7 +12,13 @@ from transformers import PreTrainedTokenizerBase
 
 class ActionTokenizer:
     def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, bins: int = 256, min_action: int = -1, max_action: int = 1
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        bins: int = 256,
+        min_action: int = -1,
+        max_action: int = 1,
+        action_vocab_anchor: str = "pad",
+        action_token_end_idx: Optional[int] = None,
     ) -> None:
         """
         Discretizes continuous robot actions into N bins per dimension and maps to the least used tokens.
@@ -25,26 +31,40 @@ class ActionTokenizer:
         :param min_action: Minimum action value (for clipping, setting lower bound on bin interval).
         :param max_action: Maximum action value (for clipping, setting upper bound on bin interval).
         """
-        self.tokenizer, self.n_bins, self.min_action, self.max_action = tokenizer, bins, min_action, max_action
+        self.tokenizer = tokenizer
+        self.n_bins = int(bins)
+        self.min_action = min_action
+        self.max_action = max_action
+        self.action_vocab_anchor = action_vocab_anchor
 
         # Create Uniform Bins + Compute Bin Centers
-        self.bins = np.linspace(min_action, max_action, self.n_bins)
+        self.bins = np.linspace(min_action, max_action, self.n_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-        # [Contract] Set "action_token_begin_idx" based on `self.tokenizer.vocab_size - (self.n_bins + 1)`
-        #   =>> Assumes we're always overwriting the final `n_bins` tokens of the vocabulary!
-        self.action_token_begin_idx: int = int(self.tokenizer.vocab_size - (self.n_bins + 1))
+        if action_token_end_idx is not None:
+            self.action_token_end_idx = int(action_token_end_idx)
+        else:
+            if action_vocab_anchor == "pad":
+                if self.tokenizer.pad_token_id is None:
+                    raise ValueError("tokenizer.pad_token_id must be set when action_vocab_anchor='pad'")
+                self.action_token_end_idx = int(self.tokenizer.pad_token_id)
+            elif action_vocab_anchor == "vocab_size":
+                self.action_token_end_idx = int(self.tokenizer.vocab_size)
+            else:
+                raise ValueError(f"Unknown action_vocab_anchor: {action_vocab_anchor}")
+
+        self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
 
     def __call__(self, action: np.ndarray) -> Union[str, List[str]]:
-        """Clip & bin actions to *the last `n_bins` tokens* of the vocabulary (e.g., tokenizer.vocab[-256:])."""
+        """Clip & bin actions to *the last `n_bins` tokens* of the action vocabulary range."""
         action = np.clip(action, a_min=float(self.min_action), a_max=float(self.max_action))
         discretized_action = np.digitize(action, self.bins)
 
         # Handle single element vs. batch
         if len(discretized_action.shape) == 1:
-            return self.tokenizer.decode(list(self.tokenizer.vocab_size - discretized_action))
+            return self.tokenizer.decode(list(self.action_token_end_idx - discretized_action))
         else:
-            return self.tokenizer.batch_decode((self.tokenizer.vocab_size - discretized_action).tolist())
+            return self.tokenizer.batch_decode((self.action_token_end_idx - discretized_action).tolist())
 
     def decode_token_ids_to_actions(self, action_token_ids: np.ndarray) -> np.ndarray:
         """
@@ -62,7 +82,7 @@ class ActionTokenizer:
                     self._bin_centers. Therefore, if i==255, we subtract 1 from it so that it just becomes the index of
                     the last bin center. We implement this simply via clipping between [0, 255 - 1].
         """
-        discretized_actions = self.tokenizer.vocab_size - action_token_ids
+        discretized_actions = self.action_token_end_idx - action_token_ids
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
 
         return self.bin_centers[discretized_actions]
