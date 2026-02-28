@@ -84,6 +84,7 @@ class PrismaticConfig(PretrainedConfig):
         llm_max_length: int = 2048,
         pad_token_id: int = 32000,
         mask_token_id: int = 32001,
+        action_vocab_anchor: str = "pad",
         use_mask_token: bool = False,
         use_discrete_diffusion: bool = False,
         use_discrete_flow_matching: bool = False,
@@ -119,6 +120,7 @@ class PrismaticConfig(PretrainedConfig):
         self.llm_max_length = llm_max_length
         self.pad_token_id, self.pad_to_multiple_of = pad_token_id, pad_to_multiple_of
         self.mask_token_id, self.use_mask_token = mask_token_id, use_mask_token
+        self.action_vocab_anchor = action_vocab_anchor
 
         self.use_discrete_diffusion = use_discrete_diffusion
         self.use_discrete_flow_matching = use_discrete_flow_matching

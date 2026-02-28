@@ -208,7 +208,17 @@ def load_vla(
     )
 
     # Create Action Tokenizer
-    action_tokenizer = ActionTokenizer(llm_backbone.get_tokenizer())
+    if isinstance(model_cfg, dict):
+        n_action_bins = model_cfg.get("n_action_bins")
+        action_vocab_anchor = model_cfg.get("action_vocab_anchor", "pad")
+    else:
+        n_action_bins = getattr(model_cfg, "n_action_bins", None)
+        action_vocab_anchor = getattr(model_cfg, "action_vocab_anchor", "pad")
+    action_tokenizer = ActionTokenizer(
+        llm_backbone.get_tokenizer(),
+        bins=n_action_bins if n_action_bins is not None else 256,
+        action_vocab_anchor=action_vocab_anchor,
+    )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
     overwatch.info(f"Loading VLA [bold blue]{model_cfg.model_id}[/] from Checkpoint")
