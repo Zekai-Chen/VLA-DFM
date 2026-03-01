@@ -392,6 +392,39 @@ def get_processor(cfg: Any) -> AutoProcessor:
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
 
 
+def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> None:
+    """Ensure tokenizer and model embeddings are aligned (fail fast on mismatches)."""
+    vocab_len = len(tokenizer)
+    emb_n = model.get_input_embeddings().num_embeddings
+    out_emb = None
+    if hasattr(model, "get_output_embeddings"):
+        out_emb = model.get_output_embeddings()
+    if out_emb is None and hasattr(model, "language_model"):
+        out_emb = model.language_model.get_output_embeddings()
+    out_n = None
+    if out_emb is not None:
+        if hasattr(out_emb, "out_features"):
+            out_n = out_emb.out_features
+        elif hasattr(out_emb, "num_embeddings"):
+            out_n = out_emb.num_embeddings
+        elif hasattr(out_emb, "weight"):
+            out_n = out_emb.weight.shape[0]
+
+    if emb_n != vocab_len:
+        raise RuntimeError(f"Tokenizer length != input embeddings: len(tokenizer)={vocab_len}, emb={emb_n}")
+    if out_n is not None and out_n != vocab_len:
+        raise RuntimeError(f"Tokenizer length != output embeddings: len(tokenizer)={vocab_len}, out={out_n}")
+
+    if tokenizer.pad_token_id is None or tokenizer.mask_token_id is None:
+        raise RuntimeError(
+            f"Tokenizer missing special tokens: pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
+        )
+    if tokenizer.pad_token_id >= vocab_len or tokenizer.mask_token_id >= vocab_len:
+        raise RuntimeError(
+            f"Special token ids out of range: len(tokenizer)={vocab_len}, pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
+        )
+
+
 def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioProjector:
     """
     Get proprioception projector for the VLA model.
@@ -766,13 +799,7 @@ def get_vla_action(
         debug = None
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
-            processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
-            if hasattr(vla, "config"):
-                vla.config.set_mask_token_id(processor.tokenizer.mask_token_id)
-            if hasattr(vla, "mask_token_id"):
-                vla.mask_token_id = processor.tokenizer.mask_token_id
-            if hasattr(vla, "config") and hasattr(vla.config, "use_mask_token"):
-                vla.config.use_mask_token = True
+            raise RuntimeError("mask_token_id missing in tokenizer — checkpoint tokenizer is incompatible with DFM.")
         was_dfm_trained = getattr(vla.config, "use_discrete_flow_matching", False) if hasattr(vla, "config") else False
         if use_discrete_flow_matching and hasattr(vla, "config") and hasattr(vla.config, "use_discrete_flow_matching"):
             vla.config.use_discrete_flow_matching = True
@@ -838,6 +865,11 @@ def get_vla_action(
         if clamp_values is not None and isinstance(clamp_mask, bool) and not clamp_mask:
             clamp_mask = True
 
+        # Prefer checkpoint schedule when not explicitly set
+        dfm_schedule = getattr(cfg, "dfm_schedule", None)
+        if dfm_schedule in (None, "", "auto"):
+            dfm_schedule = getattr(getattr(vla, "config", None), "dfm_schedule", "cosine")
+
         # Generate action
         if action_head is None:
             # Standard VLA output (single-image inputs, discrete actions)
@@ -854,7 +886,7 @@ def get_vla_action(
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
@@ -890,7 +922,7 @@ def get_vla_action(
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),

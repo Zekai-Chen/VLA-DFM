@@ -36,6 +36,7 @@ from experiments.robot.openvla_utils import (
     get_noisy_action_projector,
     get_processor,
     get_proprio_projector,
+    validate_model_tokenizer_alignment,
     resize_image_for_policy,
 )
 from experiments.robot.robot_utils import (
@@ -206,6 +207,7 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
+        validate_model_tokenizer_alignment(model, processor.tokenizer)
         check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor

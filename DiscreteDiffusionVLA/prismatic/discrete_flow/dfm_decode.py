@@ -49,6 +49,14 @@ def dfm_decode(
     if clamp_mask is None:
         clamp_mask = torch.zeros_like(cur, dtype=torch.bool, device=device)
 
+    n_action_positions = int((~clamp_mask).sum().item())
+    n_masked_initial = int(((init_ids == mask_token_id) & (~clamp_mask)).sum().item())
+    if decode_mode == "maskgit" and n_action_positions > 0 and n_masked_initial != n_action_positions:
+        raise RuntimeError(
+            f"MaskGIT init mismatch: masked={n_masked_initial}, free={n_action_positions}. "
+            "Action span or masking is incorrect."
+        )
+
     if clamp_values is not None:
         clamp_values = clamp_values.to(device)
         cur = torch.where(clamp_mask, clamp_values, cur)
@@ -74,6 +82,8 @@ def dfm_decode(
     for step, t in enumerate(t_grid):
         # Exit if no unresolved positions remain
         unresolved = (cur == mask_token_id) & (~clamp_mask)
+        if debug_level >= 1:
+            debug_unresolved.append(int(unresolved.sum().item()))
         if early_exit and unresolved.sum().item() == 0:
             early_exit_iter = step
             break
@@ -301,10 +311,14 @@ def dfm_decode(
         "dfm_num_changed_tokens": num_changed_per_step,
         "dfm_mask_frac_final": dfm_mask_frac_final,
         "dfm_unresolved_final": dfm_unresolved_final,
+        "dfm_decode_mode": decode_mode,
+        "dfm_n_action_positions": n_action_positions,
+        "dfm_n_masked_initial": n_masked_initial,
     }
+    if debug_level >= 1:
+        stats["dfm_unresolved_count"] = debug_unresolved
     if debug_level >= 2:
         stats["dfm_p_update"] = debug_p_update
         stats["dfm_top1_prob_mean"] = debug_top1_prob
-        stats["dfm_unresolved_count"] = debug_unresolved
 
     return cur, actions_hidden_states, stats

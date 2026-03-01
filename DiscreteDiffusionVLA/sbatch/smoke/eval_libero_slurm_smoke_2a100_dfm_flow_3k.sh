@@ -79,7 +79,7 @@ DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
 DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
-DFM_SCHEDULE=${DFM_SCHEDULE:-sin}
+DFM_SCHEDULE=${DFM_SCHEDULE:-}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 
@@ -105,6 +105,23 @@ elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
   CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
 fi
 export CKPT_PATH
+
+if [[ -z "${DFM_SCHEDULE}" ]]; then
+  DFM_SCHEDULE=$(python - <<'PY'
+import json, os
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("cosine")
+    raise SystemExit(0)
+cfg_path = os.path.join(ckpt, "config.json")
+if not os.path.exists(cfg_path):
+    print("cosine")
+    raise SystemExit(0)
+cfg = json.load(open(cfg_path))
+print(cfg.get("dfm_schedule", "cosine"))
+PY
+)
+fi
 
 python - <<'PY'
 import json, os, sys
@@ -149,8 +166,13 @@ try:
     tok = processor.tokenizer
     print("Tokenizer summary:")
     print("  vocab_size:", tok.vocab_size)
+    print("  vocab_len:", len(tok))
     print("  pad_token_id:", tok.pad_token_id)
     print("  mask_token_id:", tok.mask_token_id)
+    if tok.pad_token_id is None or tok.mask_token_id is None:
+        print("WARNING: pad_token_id or mask_token_id is None.")
+    elif tok.pad_token_id >= len(tok) or tok.mask_token_id >= len(tok):
+        print("WARNING: pad/mask token id out of range for len(tokenizer).")
     # derive action range from config + tokenizer
     cfg = getattr(processor, "config", None)
 except Exception:
@@ -169,11 +191,11 @@ def _get(cfg, key, default=None):
 anchor = _get(cfg, "action_vocab_anchor", "pad")
 n_bins = _get(cfg, "n_action_bins", 256)
 pad_id = _get(cfg, "pad_token_id", None)
-vocab_size = tok.vocab_size if tok is not None else _get(cfg, "vocab_size", None)
+vocab_len = len(tok) if tok is not None else None
 if anchor == "pad" and pad_id is not None:
     action_end = int(pad_id)
-elif anchor == "vocab_size" and vocab_size is not None:
-    action_end = int(vocab_size)
+elif anchor == "vocab_size" and vocab_len is not None:
+    action_end = int(vocab_len)
 else:
     action_end = None
 action_begin = action_end - int(n_bins) if action_end is not None else None
