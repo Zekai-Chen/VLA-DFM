@@ -28,6 +28,7 @@ from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    STOP_INDEX,
 )
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
@@ -713,6 +714,20 @@ def prepare_images_for_vla(images: List[np.ndarray], cfg: Any) -> List[Image.Ima
     return processed_images
 
 
+def _strip_eos_from_inputs(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Remove trailing EOS token to match training-time prompt handling."""
+    if "input_ids" not in inputs:
+        return inputs
+    input_ids = inputs["input_ids"]
+    if input_ids.numel() == 0:
+        return inputs
+    if input_ids[0, -1].item() == STOP_INDEX:
+        inputs["input_ids"] = input_ids[:, :-1]
+        if "attention_mask" in inputs and inputs["attention_mask"] is not None:
+            inputs["attention_mask"] = inputs["attention_mask"][:, :-1]
+    return inputs
+
+
 def get_vla_action(
     cfg: Any,
     vla: torch.nn.Module,
@@ -791,11 +806,13 @@ def get_vla_action(
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+        inputs = _strip_eos_from_inputs(inputs)
 
         # Process additional wrist images if any
         if all_images:
             all_wrist_inputs = [
-                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
+                _strip_eos_from_inputs(processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16))
+                for image_wrist in all_images
             ]
             # Concatenate all images
             primary_pixel_values = inputs["pixel_values"]
@@ -855,6 +872,11 @@ def get_vla_action(
                     dfm_debug_level=dfm_debug_level,
                     dfm_decode_mode=dfm_decode_mode,
                 )
+                if debug is not None:
+                    try:
+                        debug["prompt_tail_tokens"] = inputs["input_ids"][0, -3:].detach().cpu().tolist()
+                    except Exception:
+                        pass
             else:
                 action, _ = vla.predict_action(
                     **inputs,

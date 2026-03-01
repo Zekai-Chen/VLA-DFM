@@ -1874,12 +1874,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             debug = None
             if return_debug:
                 action_start = 1 + NUM_PROMPT_TOKENS
-                action_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+                action_span_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
                 prefix = input_ids[:, :action_start]
-                suffix = input_ids[:, action_end:]
+                suffix = input_ids[:, action_span_end:]
                 full_seq = torch.cat([prefix, final_ids, suffix], dim=1)
                 action_span_mask = torch.zeros_like(full_seq, dtype=torch.bool)
-                action_span_mask[:, action_start:action_end] = True
+                action_span_mask[:, action_start:action_span_end] = True
                 changed_off_action = (full_seq != input_ids) & (~action_span_mask)
                 changed_off_action_count = int(changed_off_action.sum().item())
                 stop_token_corrupted = bool((full_seq[:, -1] != input_ids[:, -1]).any().item())

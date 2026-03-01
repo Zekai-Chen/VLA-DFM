@@ -213,8 +213,9 @@ start_job() {
       --use_discrete_diffusion False \
       --use_discrete_flow_matching True \
       --use_film False \
-      --center_crop False \
+      --center_crop True \
       --num_images_in_input 2 \
+      --num_open_loop_steps 1 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
       --dfm_debug ${DFM_DEBUG} \

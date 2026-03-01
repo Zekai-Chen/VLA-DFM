@@ -405,6 +405,53 @@ def run_episode(
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
                     if debug_writer is not None:
+                        # Minimal diagnostics: first episode only
+                        if episode_idx == 0:
+                            actions_np = np.asarray(actions)
+                            if actions_np.size > 0:
+                                raw_gripper = float(actions_np.reshape(-1, actions_np.shape[-1])[:, -1][0])
+                            else:
+                                raw_gripper = None
+                            raw_min = float(np.min(actions_np)) if actions_np.size else None
+                            raw_max = float(np.max(actions_np)) if actions_np.size else None
+                            raw_mean = float(np.mean(actions_np)) if actions_np.size else None
+                            raw_std = float(np.std(actions_np)) if actions_np.size else None
+                            raw_clip = (
+                                float(np.mean(np.abs(actions_np) >= 1.0)) if actions_np.size else None
+                            )
+                            post_actions = np.stack(
+                                [process_action(a.copy(), cfg.model_family) for a in actions_np],
+                                axis=0,
+                            ) if actions_np.size else actions_np
+                            if post_actions.size > 0:
+                                post_gripper = float(post_actions.reshape(-1, post_actions.shape[-1])[:, -1][0])
+                            else:
+                                post_gripper = None
+                            post_min = float(np.min(post_actions)) if post_actions.size else None
+                            post_max = float(np.max(post_actions)) if post_actions.size else None
+                            post_mean = float(np.mean(post_actions)) if post_actions.size else None
+                            post_std = float(np.std(post_actions)) if post_actions.size else None
+                            post_clip = (
+                                float(np.mean(np.abs(post_actions) >= 1.0)) if post_actions.size else None
+                            )
+                            debug = dict(debug) if debug is not None else {}
+                            debug["unnorm_key"] = getattr(cfg, "unnorm_key", None)
+                            debug["action_unnorm_stats"] = {
+                                "min": raw_min,
+                                "max": raw_max,
+                                "mean": raw_mean,
+                                "std": raw_std,
+                                "clip_frac": raw_clip,
+                            }
+                            debug["action_postprocess_stats"] = {
+                                "min": post_min,
+                                "max": post_max,
+                                "mean": post_mean,
+                                "std": post_std,
+                                "clip_frac": post_clip,
+                            }
+                            debug["gripper_raw"] = raw_gripper
+                            debug["gripper_post"] = post_gripper
                         debug_writer.write(
                             {
                                 "t_wall": time.time(),
