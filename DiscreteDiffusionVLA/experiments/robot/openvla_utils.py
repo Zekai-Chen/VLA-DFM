@@ -909,6 +909,15 @@ def get_vla_action(
                         debug["prompt_tail_tokens"] = inputs["input_ids"][0, -3:].detach().cpu().tolist()
                     except Exception:
                         pass
+                    if dfm_decode_mode == "maskgit":
+                        dfm_stats = debug.get("dfm_stats", {})
+                        n_action = dfm_stats.get("dfm_n_action_positions")
+                        n_masked = dfm_stats.get("dfm_n_masked_initial")
+                        if (n_action is not None) and (n_masked is not None) and (n_action != n_masked):
+                            raise RuntimeError(
+                                f"MaskGIT init mismatch: n_masked_initial={n_masked}, "
+                                f"n_action_positions={n_action}. Action span/masking is incorrect."
+                            )
             else:
                 action, _ = vla.predict_action(
                     **inputs,

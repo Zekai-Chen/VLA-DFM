@@ -407,8 +407,8 @@ def run_episode(
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
                     if debug_writer is not None:
-                        # Minimal diagnostics: first episode only
-                        if episode_idx == 0:
+                        # Minimal diagnostics: first two episodes only
+                        if episode_idx < 2:
                             actions_np = np.asarray(actions)
                             if actions_np.size > 0:
                                 raw_gripper = float(actions_np.reshape(-1, actions_np.shape[-1])[:, -1][0])
@@ -466,6 +466,16 @@ def run_episode(
                                 "dfm_unresolved_count": dfm_stats.get("dfm_unresolved_count"),
                                 "dfm_num_changed_tokens": dfm_stats.get("dfm_num_changed_tokens"),
                             }
+                        # Integrity check for maskgit decoding
+                        if cfg.dfm_decode_mode == "maskgit":
+                            dfm_stats = debug.get("dfm_stats", {}) if debug is not None else {}
+                            n_action = dfm_stats.get("dfm_n_action_positions")
+                            n_masked = dfm_stats.get("dfm_n_masked_initial")
+                            if (n_action is not None) and (n_masked is not None) and (n_action != n_masked):
+                                raise RuntimeError(
+                                    f"MaskGIT init mismatch: n_masked_initial={n_masked}, "
+                                    f"n_action_positions={n_action}. Action span/masking is incorrect."
+                                )
                         debug_writer.write(
                             {
                                 "t_wall": time.time(),

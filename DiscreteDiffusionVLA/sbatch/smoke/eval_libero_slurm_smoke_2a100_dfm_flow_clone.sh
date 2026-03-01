@@ -81,6 +81,7 @@ DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_EARLY_EXIT_FRAC=${DFM_EARLY_EXIT_FRAC:-0.0}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 DFM_DEBUG=${DFM_DEBUG:-False}
+NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -148,6 +149,7 @@ start_job() {
       --dfm_early_exit ${DFM_EARLY_EXIT} \
       --dfm_early_exit_frac ${DFM_EARLY_EXIT_FRAC} \
       --dfm_debug ${DFM_DEBUG} \
+      --num_open_loop_steps ${NUM_OPEN_LOOP_STEPS} \
       --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
