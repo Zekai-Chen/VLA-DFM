@@ -96,6 +96,9 @@ DFM_T_MIN=0.0
 DFM_T_MAX=0.999
 DFM_WEIGHT_CLIP=20.0
 DFM_TRAIN_MODE="flow"
+# Eval parity (finetune does not consume these flags)
+DFM_NUM_STEPS=128
+DFM_EARLY_EXIT=False
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
 

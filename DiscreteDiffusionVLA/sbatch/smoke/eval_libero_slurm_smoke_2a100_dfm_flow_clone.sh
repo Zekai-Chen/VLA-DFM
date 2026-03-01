@@ -77,6 +77,9 @@ TASK_SUITE="libero_object"
 NUM_TRIALS=2
 DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
 DFM_SCHEDULE=${DFM_SCHEDULE:-}
+DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
+DFM_EARLY_EXIT_FRAC=${DFM_EARLY_EXIT_FRAC:-0.0}
+DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 DFM_DEBUG=${DFM_DEBUG:-False}
 
 # Use 1 job per GPU for smoke
@@ -141,6 +144,9 @@ start_job() {
       --topk_filter_thres 0.0 \
       --dfm_num_steps ${DFM_NUM_STEPS} \
       --dfm_schedule ${DFM_SCHEDULE} \
+      --dfm_decode_mode ${DFM_DECODE_MODE} \
+      --dfm_early_exit ${DFM_EARLY_EXIT} \
+      --dfm_early_exit_frac ${DFM_EARLY_EXIT_FRAC} \
       --dfm_debug ${DFM_DEBUG} \
       --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
