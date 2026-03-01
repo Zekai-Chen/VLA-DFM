@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke_3k/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260228_0010"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260228_2041"
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
@@ -93,6 +93,44 @@ for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 STEPS=(
   3000
 )
+
+# --- Preflight: validate checkpoint config matches DFM eval expectations ---
+FIRST_STEP="${STEPS[0]}"
+CKPT_PATH="${CHECKPOINT_ROOT}--${FIRST_STEP}_chkpt"
+if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
+  CKPT_PATH="${CHECKPOINT_ROOT}"
+elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
+  CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
+fi
+
+python - <<'PY'
+import json, os, sys
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping config validation.")
+    sys.exit(0)
+cfg_path = os.path.join(ckpt, "config.json")
+if not os.path.exists(cfg_path):
+    print(f"WARNING: config.json not found at {cfg_path}")
+    sys.exit(0)
+cfg = json.load(open(cfg_path))
+print("Checkpoint config summary:")
+for k in [
+    "use_discrete_flow_matching",
+    "use_discrete_diffusion",
+    "use_mask_token",
+    "dfm_schedule",
+    "dfm_loss_mode",
+    "dfm_train_mode",
+    "dfm_time_eps",
+    "dfm_t_min",
+    "dfm_t_max",
+    "dfm_weight_clip",
+]:
+    print(f"  {k}: {cfg.get(k)}")
+if not cfg.get("use_discrete_flow_matching", False):
+    print("WARNING: config.use_discrete_flow_matching is False. Eval may mismatch training.")
+PY
 
 declare -a JOB_PIDS
 for ((i=0; i<TOTAL_SLOTS; i++)); do
