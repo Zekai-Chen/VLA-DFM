@@ -169,6 +169,12 @@ def _teacher_forced_metrics(
     proprio = batch.get("proprio")
     if proprio is not None:
         proprio = proprio.to(device)
+        if proprio_projector is not None:
+            try:
+                proj_dtype = next(proprio_projector.parameters()).dtype
+                proprio = proprio.to(dtype=proj_dtype)
+            except StopIteration:
+                pass
 
     with torch.no_grad():
         output = vla(
@@ -322,6 +328,12 @@ def _evaluate_checkpoint(
     proprio = batch.get("proprio")
     if proprio is not None:
         proprio = proprio.to(device)
+        if proprio_projector is not None:
+            try:
+                proj_dtype = next(proprio_projector.parameters()).dtype
+                proprio = proprio.to(dtype=proj_dtype)
+            except StopIteration:
+                pass
 
         with torch.no_grad():
             pred_actions_unnorm, _, debug = vla.predict_action(
