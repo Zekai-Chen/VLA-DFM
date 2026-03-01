@@ -161,6 +161,7 @@ start_job() {
       --use_discrete_diffusion False \
       --use_discrete_flow_matching True \
       --use_film False \
+      --center_crop False \
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \

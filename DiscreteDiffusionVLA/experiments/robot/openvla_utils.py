@@ -24,6 +24,7 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
+from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -779,8 +780,14 @@ def get_vla_action(
         # Extract primary image and additional images
         primary_image = all_images.pop(0)
 
-        # Build VLA prompt
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+        # Build VLA prompt to mirror training-time formatting
+        prompt_builder = PurePromptBuilder("openvla")
+        prompt_builder.add_turn("human", f"What action should the robot take to {task_label.lower()}?")
+        prompt_builder.add_turn("gpt", "")
+        prompt = prompt_builder.get_prompt()
+        # Training drops the terminal EOS; keep the trailing space before it.
+        if prompt.endswith("</s>"):
+            prompt = prompt[: -len("</s>")]
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
