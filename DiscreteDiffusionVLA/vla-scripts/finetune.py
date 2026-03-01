@@ -143,6 +143,26 @@ def resolve_torch_dtype(dtype_str: str) -> torch.dtype:
     raise ValueError(f"Unsupported torch_dtype: {dtype_str}")
 
 
+def _apply_finetune_cfg_to_model_config(cfg, model_config, processor) -> None:
+    """Apply finetune CLI args to model config so checkpoints are self-describing."""
+    if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
+        if processor.tokenizer.mask_token_id is None:
+            processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+        model_config.set_mask_token_id(processor.tokenizer.mask_token_id)
+        if hasattr(model_config, "use_mask_token"):
+            model_config.use_mask_token = True
+
+    model_config.use_discrete_diffusion = cfg.use_discrete_diffusion
+    model_config.use_discrete_flow_matching = cfg.use_discrete_flow_matching
+    model_config.dfm_schedule = cfg.dfm_schedule
+    model_config.dfm_time_eps = cfg.dfm_time_eps
+    model_config.dfm_t_min = cfg.dfm_t_min
+    model_config.dfm_t_max = cfg.dfm_t_max
+    model_config.dfm_loss_mode = cfg.dfm_loss_mode
+    model_config.dfm_weight_clip = cfg.dfm_weight_clip
+    model_config.dfm_train_mode = cfg.dfm_train_mode
+
+
 def remove_ddp_in_checkpoint(state_dict) -> dict:
     """
     Removes the 'module.' prefix from parameter names in a PyTorch model state dictionary that was saved using
@@ -716,6 +736,7 @@ def save_training_checkpoint(
     if distributed_state.is_main_process:
         # Save processor and LoRA adapter
         processor.save_pretrained(checkpoint_dir)
+        vla.module.config.save_pretrained(checkpoint_dir)
         vla.module.save_pretrained(adapter_dir)
 
         # Save other components
@@ -743,13 +764,19 @@ def save_training_checkpoint(
     # Note: Can be very slow on some devices; if so, we recommend merging offline
     if cfg.use_lora and cfg.merge_lora_during_training:
         base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=resolve_torch_dtype(cfg.torch_dtype), low_cpu_mem_usage=True, trust_remote_code=True
+            cfg.vla_path,
+            config=vla.module.config,
+            torch_dtype=resolve_torch_dtype(cfg.torch_dtype),
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
         )
         merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
         merged_vla = merged_vla.merge_and_unload()
 
         if distributed_state.is_main_process:
+            merged_vla.config = vla.module.config
             merged_vla.save_pretrained(checkpoint_dir)
+            vla.module.config.save_pretrained(checkpoint_dir)
             print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
 
         # Wait for merged model to be saved
@@ -957,15 +984,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
-    if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
-        processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
-        # Set the mask token ID on the configuration instance
-        model_config.set_mask_token_id(processor.tokenizer.mask_token_id)
-        # model_config.set_vocab_size(len(processor.tokenizer))  # 自行向上取整到64的整数倍, 原本还有空间不需要调整
-    if cfg.use_discrete_diffusion:
-        model_config.set_dicrete_diffusion()
-    if cfg.use_discrete_flow_matching:
-        model_config.set_discrete_flow_matching()
+    _apply_finetune_cfg_to_model_config(cfg, model_config, processor)
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
