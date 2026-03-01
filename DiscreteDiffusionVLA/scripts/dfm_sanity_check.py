@@ -17,6 +17,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 # Ensure repo root is on sys.path for "experiments.*" imports
@@ -31,9 +32,16 @@ from experiments.robot.openvla_utils import (  # noqa: E402
 )
 from experiments.robot.robot_utils import get_model  # noqa: E402
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+from prismatic.training.train_utils import compute_token_accuracy, get_current_action_mask
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK, ACTION_PROPRIO_NORMALIZATION_TYPE, NormalizationType
+from prismatic.vla.constants import (
+    ACTION_DIM,
+    NUM_ACTIONS_CHUNK,
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+    STOP_INDEX,
+    NormalizationType,
+)
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 
 
@@ -129,48 +137,124 @@ def _compare_image_transforms(
     return mean_diff, std_diff, l2
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--data_root", required=True)
-    parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--num_batches", type=int, default=5)
-    parser.add_argument("--dfm_decode_mode", type=str, default="maskgit")
-    parser.add_argument("--dfm_num_steps", type=int, default=128)
-    parser.add_argument("--dfm_early_exit", type=str, default="False")
-    parser.add_argument("--center_crop", type=str, default="True")
-    parser.add_argument("--use_proprio", type=str, default="True")
-    parser.add_argument("--check_image_parity", type=str, default="False")
-    args = parser.parse_args()
+def _as_bool(v: str) -> bool:
+    return str(v).lower() in ("1", "true", "yes", "y")
 
-    def _as_bool(v: str) -> bool:
-        return str(v).lower() in ("1", "true", "yes", "y")
 
+def _compute_num_patches(vla, use_proprio: bool) -> int:
+    num_patches = vla.vision_backbone.get_num_patches() * vla.vision_backbone.get_num_images_in_input()
+    if use_proprio:
+        num_patches += 1
+    return num_patches
+
+
+def _teacher_forced_metrics(
+    vla,
+    batch: Dict[str, torch.Tensor],
+    action_tokenizer: ActionTokenizer,
+    unnorm_key: str,
+    proprio_projector,
+    use_proprio: bool,
+    dfm_schedule: str,
+) -> Dict[str, float]:
+    device = next(vla.parameters()).device
+    pixel_dtype = torch.bfloat16
+    if hasattr(vla, "vision_backbone") and hasattr(vla.vision_backbone, "half_precision_dtype"):
+        pixel_dtype = vla.vision_backbone.half_precision_dtype
+
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
+    pixel_values = batch["pixel_values"].to(device, dtype=pixel_dtype)
+    proprio = batch.get("proprio")
+    if proprio is not None:
+        proprio = proprio.numpy()
+
+    with torch.no_grad():
+        output = vla(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            labels=labels,
+            output_hidden_states=False,
+            proprio=proprio if use_proprio else None,
+            proprio_projector=proprio_projector if use_proprio else None,
+            use_film=False,
+            dfm_schedule=dfm_schedule,
+        )
+
+    num_patches = _compute_num_patches(vla, use_proprio)
+    logits = output.logits[:, num_patches:-1, :]
+    gt_tokens = labels[:, 1:]
+    # Align shapes if needed
+    min_len = min(logits.shape[1], gt_tokens.shape[1])
+    logits = logits[:, :min_len]
+    gt_tokens = gt_tokens[:, :min_len]
+    pred_tokens = logits.argmax(dim=-1)
+
+    action_begin = action_tokenizer.action_token_begin_idx
+    action_end = action_tokenizer.action_token_end_idx
+    action_mask = get_current_action_mask(gt_tokens, action_begin, action_end)
+
+    metrics: Dict[str, float] = {}
+    if action_mask.sum().item() > 0:
+        action_logits = logits[action_mask]
+        action_targets = gt_tokens[action_mask]
+        action_ce = F.cross_entropy(action_logits, action_targets, reduction="mean")
+        action_acc = compute_token_accuracy(pred_tokens, gt_tokens, action_mask)
+        metrics["teacher_forced_action_ce"] = float(action_ce.item())
+        metrics["teacher_forced_action_acc"] = float(action_acc.item())
+    else:
+        metrics["teacher_forced_action_ce"] = float("nan")
+        metrics["teacher_forced_action_acc"] = float("nan")
+
+    stop_mask = gt_tokens == STOP_INDEX
+    if stop_mask.sum().item() > 0:
+        stop_acc = (pred_tokens[stop_mask] == gt_tokens[stop_mask]).float().mean()
+        metrics["teacher_forced_stop_acc"] = float(stop_acc.item())
+    else:
+        metrics["teacher_forced_stop_acc"] = float("nan")
+
+    return metrics
+
+
+def _evaluate_checkpoint(
+    label: str,
+    checkpoint: str,
+    data_root: str,
+    dataset_name: str,
+    num_batches: int,
+    use_discrete_flow_matching: bool,
+    use_discrete_diffusion: bool,
+    dfm_decode_mode: str,
+    dfm_num_steps: int,
+    dfm_early_exit: bool,
+    center_crop: bool,
+    use_proprio: bool,
+    check_image_parity: bool,
+) -> Dict[str, float]:
     cfg = SimpleNamespace(
         model_family="openvla",
-        pretrained_checkpoint=args.checkpoint,
+        pretrained_checkpoint=checkpoint,
         use_film=False,
         num_images_in_input=2,
         load_in_8bit=False,
         load_in_4bit=False,
-        center_crop=_as_bool(args.center_crop),
-        dfm_num_steps=int(args.dfm_num_steps),
-        dfm_early_exit=_as_bool(args.dfm_early_exit),
+        center_crop=center_crop,
+        dfm_num_steps=int(dfm_num_steps),
+        dfm_early_exit=dfm_early_exit,
     )
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     processor = get_processor(cfg)
     vla = get_model(cfg)
     proprio_projector = None
-    if _as_bool(args.use_proprio):
+    if use_proprio:
         proprio_projector = get_proprio_projector(cfg, vla.llm_dim, proprio_dim=8)
 
-    # Action tokenizer + unnorm key
     n_action_bins = getattr(vla.config, "n_action_bins", 256)
     anchor = getattr(vla.config, "action_vocab_anchor", "pad")
     action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
-    unnorm_key = _resolve_unnorm_key(vla, args.dataset_name)
+    unnorm_key = _resolve_unnorm_key(vla, dataset_name)
     action_stats = vla.get_action_stats(unnorm_key)
 
     use_wrist_image = getattr(vla.vision_backbone, "get_num_images_in_input", lambda: 1)() > 1
@@ -180,11 +264,11 @@ def main() -> None:
         image_transform=processor.image_processor.apply_transform,
         prompt_builder_fn=PurePromptBuilder,
         use_wrist_image=use_wrist_image,
-        use_proprio=_as_bool(args.use_proprio),
+        use_proprio=use_proprio,
     )
     dataset = RLDSDataset(
-        data_root_dir=args.data_root,
-        data_mix=args.dataset_name,
+        data_root_dir=data_root,
+        data_mix=dataset_name,
         batch_transform=batch_transform,
         resize_resolution=tuple(vla.config.image_sizes),
         shuffle_buffer_size=10_000,
@@ -196,28 +280,31 @@ def main() -> None:
         padding_side="right",
     )
 
-    # Optional parity check for the first sample
-    if _as_bool(args.check_image_parity):
+    if check_image_parity:
         first = next(iter(dataset))
         raw_img = first.get("_raw_image")
         if raw_img is not None:
             mean_diff, std_diff, l2 = _compare_image_transforms(raw_img, processor, cfg)
             print(
-                f"[image_parity] mean_diff={mean_diff:+.6f} std_diff={std_diff:+.6f} l2={l2:.6f}"
+                f"[{label}] [image_parity] mean_diff={mean_diff:+.6f} std_diff={std_diff:+.6f} l2={l2:.6f}"
             )
 
-    # Metrics accumulators
+    # Accumulators
     token_match_sum = 0.0
-    token_total = 0
-    seq_match_sum = 0
+    seq_match_sum = 0.0
     l2_norm_sum = 0.0
     l2_unnorm_sum = 0.0
+    tf_ce_sum = 0.0
+    tf_acc_sum = 0.0
+    tf_stop_sum = 0.0
+    tf_count = 0
     count = 0
 
     data_iter = iter(dataset)
-    for _ in range(args.num_batches):
+    for _ in range(num_batches):
         sample = next(data_iter)
         batch = collator([sample])
+        device = next(vla.parameters()).device
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         pixel_dtype = torch.bfloat16
@@ -232,12 +319,10 @@ def main() -> None:
         input_ids_prompt = input_ids[:, :prompt_len]
         attention_mask_prompt = attention_mask[:, :prompt_len]
 
-        # Proprio (if present)
         proprio = batch.get("proprio")
         if proprio is not None:
             proprio = proprio.numpy()
 
-        # DFM predict
         with torch.no_grad():
             pred_actions_unnorm, _, debug = vla.predict_action(
                 input_ids=input_ids_prompt,
@@ -247,12 +332,12 @@ def main() -> None:
                 proprio=proprio,
                 proprio_projector=proprio_projector,
                 use_film=False,
-                use_discrete_diffusion=False,
-                use_discrete_flow_matching=True,
-                dfm_num_steps=int(args.dfm_num_steps),
+                use_discrete_diffusion=use_discrete_diffusion,
+                use_discrete_flow_matching=use_discrete_flow_matching,
+                dfm_num_steps=int(dfm_num_steps),
                 dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
-                dfm_early_exit=_as_bool(args.dfm_early_exit),
-                dfm_decode_mode=args.dfm_decode_mode,
+                dfm_early_exit=dfm_early_exit,
+                dfm_decode_mode=dfm_decode_mode,
                 return_debug=True,
                 dfm_debug_level=1,
             )
@@ -269,7 +354,6 @@ def main() -> None:
 
         token_match = (pred_token_ids == gt_token_ids)
         token_match_sum += float(token_match.mean())
-        token_total += 1
         seq_match_sum += float(token_match.all())
 
         l2_norm = float(np.sqrt(np.mean((pred_actions_norm - gt_actions_norm) ** 2)))
@@ -278,23 +362,104 @@ def main() -> None:
         l2_unnorm_sum += l2_unnorm
         count += 1
 
+        tf_metrics = _teacher_forced_metrics(
+            vla=vla,
+            batch=batch,
+            action_tokenizer=action_tokenizer,
+            unnorm_key=unnorm_key,
+            proprio_projector=proprio_projector,
+            use_proprio=use_proprio,
+            dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
+        )
+        if not math.isnan(tf_metrics["teacher_forced_action_ce"]):
+            tf_ce_sum += tf_metrics["teacher_forced_action_ce"]
+            tf_acc_sum += tf_metrics["teacher_forced_action_acc"]
+            tf_stop_sum += tf_metrics["teacher_forced_stop_acc"]
+            tf_count += 1
+
         dfm_stats = (debug or {}).get("dfm_stats", {})
         print(
-            f"[batch {count}] token_match={token_match.mean():.3f} seq_match={token_match.all()} "
+            f"[{label} batch {count}] token_match={token_match.mean():.3f} seq_match={token_match.all()} "
             f"l2_norm={l2_norm:.4f} l2_unnorm={l2_unnorm:.4f} "
+            f"tf_ce={tf_metrics['teacher_forced_action_ce']:.4f} "
+            f"tf_acc={tf_metrics['teacher_forced_action_acc']:.4f} "
             f"dfm_decode_mode={dfm_stats.get('dfm_decode_mode')} "
             f"n_masked_init={dfm_stats.get('dfm_n_masked_initial')} "
             f"n_action_pos={dfm_stats.get('dfm_n_action_positions')}"
         )
-        print(f"[batch {count}] pred_norm_stats={_stats(pred_actions_norm)}")
-        print(f"[batch {count}] pred_unnorm_stats={_stats(pred_actions_unnorm)}")
+        print(f"[{label} batch {count}] pred_norm_stats={_stats(pred_actions_norm)}")
+        print(f"[{label} batch {count}] pred_unnorm_stats={_stats(pred_actions_unnorm)}")
 
+    summary = {}
     if count > 0:
-        print("\n=== Summary ===")
-        print(f"token_match_mean: {token_match_sum / count:.4f}")
-        print(f"seq_match_mean:   {seq_match_sum / count:.4f}")
-        print(f"l2_norm_mean:     {l2_norm_sum / count:.6f}")
-        print(f"l2_unnorm_mean:   {l2_unnorm_sum / count:.6f}")
+        summary["token_match_mean"] = token_match_sum / count
+        summary["seq_match_mean"] = seq_match_sum / count
+        summary["l2_norm_mean"] = l2_norm_sum / count
+        summary["l2_unnorm_mean"] = l2_unnorm_sum / count
+    if tf_count > 0:
+        summary["teacher_forced_action_ce"] = tf_ce_sum / tf_count
+        summary["teacher_forced_action_acc"] = tf_acc_sum / tf_count
+        summary["teacher_forced_stop_acc"] = tf_stop_sum / tf_count
+
+    print(f"\n=== {label} Summary ===")
+    for k, v in summary.items():
+        print(f"{k}: {v:.6f}")
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--data_root", required=True)
+    parser.add_argument("--dataset_name", required=True)
+    parser.add_argument("--num_batches", type=int, default=5)
+    parser.add_argument("--dfm_decode_mode", type=str, default="maskgit")
+    parser.add_argument("--dfm_num_steps", type=int, default=128)
+    parser.add_argument("--dfm_early_exit", type=str, default="False")
+    parser.add_argument("--compare_dd", type=str, default="False")
+    parser.add_argument("--dd_checkpoint", type=str, default="")
+    parser.add_argument("--dd_num_steps", type=int, default=64)
+    parser.add_argument("--center_crop", type=str, default="True")
+    parser.add_argument("--use_proprio", type=str, default="True")
+    parser.add_argument("--check_image_parity", type=str, default="False")
+    args = parser.parse_args()
+
+    check_image_parity = _as_bool(args.check_image_parity)
+    dfm_summary = _evaluate_checkpoint(
+        label="DFM",
+        checkpoint=args.checkpoint,
+        data_root=args.data_root,
+        dataset_name=args.dataset_name,
+        num_batches=args.num_batches,
+        use_discrete_flow_matching=True,
+        use_discrete_diffusion=False,
+        dfm_decode_mode=args.dfm_decode_mode,
+        dfm_num_steps=int(args.dfm_num_steps),
+        dfm_early_exit=_as_bool(args.dfm_early_exit),
+        center_crop=_as_bool(args.center_crop),
+        use_proprio=_as_bool(args.use_proprio),
+        check_image_parity=check_image_parity,
+    )
+
+    compare_dd = _as_bool(args.compare_dd) or bool(args.dd_checkpoint)
+    if compare_dd:
+        if not args.dd_checkpoint:
+            raise ValueError("--dd_checkpoint is required when --compare_dd True")
+        _evaluate_checkpoint(
+            label="DD",
+            checkpoint=args.dd_checkpoint,
+            data_root=args.data_root,
+            dataset_name=args.dataset_name,
+            num_batches=args.num_batches,
+            use_discrete_flow_matching=False,
+            use_discrete_diffusion=True,
+            dfm_decode_mode="ctmc",
+            dfm_num_steps=int(args.dd_num_steps),
+            dfm_early_exit=False,
+            center_crop=_as_bool(args.center_crop),
+            use_proprio=_as_bool(args.use_proprio),
+            check_image_parity=False,
+        )
 
 
 if __name__ == "__main__":
