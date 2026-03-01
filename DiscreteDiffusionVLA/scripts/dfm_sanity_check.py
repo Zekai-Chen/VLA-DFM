@@ -220,7 +220,10 @@ def main() -> None:
         batch = collator([sample])
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        pixel_values = batch["pixel_values"].to(device)
+        pixel_dtype = torch.bfloat16
+        if hasattr(vla, "vision_backbone") and hasattr(vla.vision_backbone, "half_precision_dtype"):
+            pixel_dtype = vla.vision_backbone.half_precision_dtype
+        pixel_values = batch["pixel_values"].to(device, dtype=pixel_dtype)
         actions_gt_norm = batch["actions"].numpy()
 
         # Determine prompt length and strip action tokens + stop
