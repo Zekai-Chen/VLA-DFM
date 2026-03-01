@@ -168,7 +168,7 @@ def _teacher_forced_metrics(
     pixel_values = batch["pixel_values"].to(device, dtype=pixel_dtype)
     proprio = batch.get("proprio")
     if proprio is not None:
-        proprio = proprio.numpy()
+        proprio = proprio.to(device)
 
     with torch.no_grad():
         output = vla(
@@ -319,9 +319,9 @@ def _evaluate_checkpoint(
         input_ids_prompt = input_ids[:, :prompt_len]
         attention_mask_prompt = attention_mask[:, :prompt_len]
 
-        proprio = batch.get("proprio")
-        if proprio is not None:
-            proprio = proprio.numpy()
+    proprio = batch.get("proprio")
+    if proprio is not None:
+        proprio = proprio.to(device)
 
         with torch.no_grad():
             pred_actions_unnorm, _, debug = vla.predict_action(
