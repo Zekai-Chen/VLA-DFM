@@ -410,10 +410,10 @@ def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> Non
         elif hasattr(out_emb, "weight"):
             out_n = out_emb.weight.shape[0]
 
-    if emb_n != vocab_len:
-        raise RuntimeError(f"Tokenizer length != input embeddings: len(tokenizer)={vocab_len}, emb={emb_n}")
-    if out_n is not None and out_n != vocab_len:
-        raise RuntimeError(f"Tokenizer length != output embeddings: len(tokenizer)={vocab_len}, out={out_n}")
+    if emb_n < vocab_len:
+        raise RuntimeError(f"Tokenizer length exceeds input embeddings: len(tokenizer)={vocab_len}, emb={emb_n}")
+    if out_n is not None and out_n != emb_n:
+        raise RuntimeError(f"Output embeddings != input embeddings: emb={emb_n}, out={out_n}")
 
     if tokenizer.pad_token_id is None or tokenizer.mask_token_id is None:
         raise RuntimeError(
