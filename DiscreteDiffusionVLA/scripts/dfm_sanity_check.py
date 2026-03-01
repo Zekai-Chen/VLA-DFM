@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Tuple
 
@@ -17,12 +19,17 @@ import numpy as np
 import torch
 from PIL import Image
 
-from experiments.robot.openvla_utils import (
-    get_model,
+# Ensure repo root is on sys.path for "experiments.*" imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from experiments.robot.openvla_utils import (  # noqa: E402
     get_processor,
     get_proprio_projector,
     prepare_images_for_vla,
 )
+from experiments.robot.robot_utils import get_model  # noqa: E402
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
