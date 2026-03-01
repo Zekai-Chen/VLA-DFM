@@ -74,7 +74,7 @@ BASE_DIR="/scratch/ywn1043/VLA-DFM"
 VLA_PATH="${BASE_DIR}/models/openvla-7b"
 DATA_ROOT="${BASE_DIR}/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
-RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-maskedce"
+RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-maskedce_256steps"
 
 # --- Training params (short) ---
 # Increased to better utilize 80GB A100s while leaving headroom for spikes.
@@ -99,7 +99,7 @@ DFM_TRAIN_MODE="flow"
 # Mask-exposure stress test: masked CE + lower t_max to increase masking frequency.
 # Note: mask/pad embeddings are now saved via LoRA modules_to_save (see finetune.py).
 # Eval parity (finetune does not consume these flags)
-DFM_NUM_STEPS=128
+DFM_NUM_STEPS=256
 DFM_EARLY_EXIT=False
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
