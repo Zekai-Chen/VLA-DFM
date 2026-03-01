@@ -80,6 +80,8 @@ DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
 DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
 DFM_SCHEDULE=${DFM_SCHEDULE:-sin}
+DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
+DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -102,6 +104,7 @@ if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
 elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
   CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
 fi
+export CKPT_PATH
 
 python - <<'PY'
 import json, os, sys
@@ -130,6 +133,55 @@ for k in [
     print(f"  {k}: {cfg.get(k)}")
 if not cfg.get("use_discrete_flow_matching", False):
     print("WARNING: config.use_discrete_flow_matching is False. Eval may mismatch training.")
+PY
+
+python - <<'PY'
+import os
+from transformers import AutoProcessor
+
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping tokenizer validation.")
+    raise SystemExit(0)
+
+try:
+    processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+    tok = processor.tokenizer
+    print("Tokenizer summary:")
+    print("  vocab_size:", tok.vocab_size)
+    print("  pad_token_id:", tok.pad_token_id)
+    print("  mask_token_id:", tok.mask_token_id)
+    # derive action range from config + tokenizer
+    cfg = getattr(processor, "config", None)
+except Exception:
+    # Fallback: load config.json directly if processor init fails
+    import json
+    cfg = json.load(open(os.path.join(ckpt, "config.json")))
+    tok = None
+
+def _get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if hasattr(cfg, key):
+        return getattr(cfg, key)
+    return cfg.get(key, default)
+
+anchor = _get(cfg, "action_vocab_anchor", "pad")
+n_bins = _get(cfg, "n_action_bins", 256)
+pad_id = _get(cfg, "pad_token_id", None)
+vocab_size = tok.vocab_size if tok is not None else _get(cfg, "vocab_size", None)
+if anchor == "pad" and pad_id is not None:
+    action_end = int(pad_id)
+elif anchor == "vocab_size" and vocab_size is not None:
+    action_end = int(vocab_size)
+else:
+    action_end = None
+action_begin = action_end - int(n_bins) if action_end is not None else None
+print("Action vocab range:")
+print("  anchor:", anchor)
+print("  n_action_bins:", n_bins)
+print("  action_begin:", action_begin)
+print("  action_end:", action_end)
 PY
 
 declare -a JOB_PIDS
@@ -170,6 +222,8 @@ start_job() {
       --dfm_fail_fast ${DFM_FAIL_FAST} \
       --dfm_num_steps ${DFM_NUM_STEPS} \
       --dfm_schedule ${DFM_SCHEDULE} \
+      --dfm_early_exit ${DFM_EARLY_EXIT} \
+      --dfm_decode_mode ${DFM_DECODE_MODE} \
       --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
