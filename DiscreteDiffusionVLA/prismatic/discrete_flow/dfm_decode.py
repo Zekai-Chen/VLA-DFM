@@ -68,6 +68,7 @@ def dfm_decode(
 
     actions_hidden_states = None
     num_changed_per_step = []
+    step_masked_count = []
     debug_p_update = []
     debug_top1_prob = []
     debug_unresolved = []
@@ -83,7 +84,9 @@ def dfm_decode(
         # Exit if no unresolved positions remain
         unresolved = (cur == mask_token_id) & (~clamp_mask)
         if debug_level >= 1:
-            debug_unresolved.append(int(unresolved.sum().item()))
+            unresolved_count = int(unresolved.sum().item())
+            debug_unresolved.append(unresolved_count)
+            step_masked_count.append(unresolved_count)
         if early_exit and unresolved.sum().item() == 0:
             early_exit_iter = step
             break
@@ -309,11 +312,13 @@ def dfm_decode(
         "dfm_dt_safe_hits": dt_safe_hits,
         "dfm_dt_under_min": dt_under_min,
         "dfm_num_changed_tokens": num_changed_per_step,
+        "dfm_step_changed_count": num_changed_per_step,
         "dfm_mask_frac_final": dfm_mask_frac_final,
         "dfm_unresolved_final": dfm_unresolved_final,
         "dfm_decode_mode": decode_mode,
         "dfm_n_action_positions": n_action_positions,
         "dfm_n_masked_initial": n_masked_initial,
+        "dfm_step_masked_count": step_masked_count,
     }
     if debug_level >= 1:
         stats["dfm_unresolved_count"] = debug_unresolved

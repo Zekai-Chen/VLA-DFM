@@ -454,6 +454,18 @@ def run_episode(
                             }
                             debug["gripper_raw"] = raw_gripper
                             debug["gripper_post"] = post_gripper
+                            dfm_stats = debug.get("dfm_stats", {})
+                            debug["dfm_stats_summary"] = {
+                                "dfm_decode_mode": dfm_stats.get("dfm_decode_mode"),
+                                "dfm_n_action_positions": dfm_stats.get("dfm_n_action_positions"),
+                                "dfm_n_masked_initial": dfm_stats.get("dfm_n_masked_initial"),
+                                "dfm_mask_frac_final": dfm_stats.get("dfm_mask_frac_final"),
+                                "dfm_unresolved_final": dfm_stats.get("dfm_unresolved_final"),
+                            }
+                            debug["dfm_steps"] = {
+                                "dfm_unresolved_count": dfm_stats.get("dfm_unresolved_count"),
+                                "dfm_num_changed_tokens": dfm_stats.get("dfm_num_changed_tokens"),
+                            }
                         debug_writer.write(
                             {
                                 "t_wall": time.time(),
