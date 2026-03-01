@@ -63,7 +63,7 @@ nvcc --version || true
 python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
 
 # --- Run params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260228_2041"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260301_1422"
 DATA_ROOT="/scratch/ywn1043/VLA-DFM/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
 NUM_BATCHES=${NUM_BATCHES:-5}
