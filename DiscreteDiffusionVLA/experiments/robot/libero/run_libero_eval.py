@@ -326,7 +326,7 @@ def _teacher_forced_metrics(
 
     action_begin = action_tokenizer.action_token_begin_idx
     action_end = action_tokenizer.action_token_end_idx
-    action_mask = get_current_action_mask(gt_tokens, action_begin, action_end)
+    action_mask = (gt_tokens >= action_begin) & (gt_tokens < action_end)
 
     metrics = {}
     if action_mask.sum().item() > 0:

@@ -156,6 +156,8 @@ def _teacher_forced_metrics(
     proprio_projector,
     use_proprio: bool,
     dfm_schedule: str,
+    mask_token_id: int,
+    compute_masked_denoise: bool = True,
 ) -> Dict[str, float]:
     device = next(vla.parameters()).device
     pixel_dtype = torch.bfloat16
@@ -176,9 +178,9 @@ def _teacher_forced_metrics(
             except StopIteration:
                 pass
 
-    with torch.no_grad():
-        output = vla(
-            input_ids=input_ids,
+    def _forward(ids: torch.Tensor):
+        return vla(
+            input_ids=ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             labels=labels,
@@ -188,6 +190,9 @@ def _teacher_forced_metrics(
             use_film=False,
             dfm_schedule=dfm_schedule,
         )
+
+    with torch.no_grad():
+        output = _forward(input_ids)
 
     num_patches = _compute_num_patches(vla, use_proprio)
     logits = output.logits[:, num_patches:-1, :]
@@ -200,7 +205,7 @@ def _teacher_forced_metrics(
 
     action_begin = action_tokenizer.action_token_begin_idx
     action_end = action_tokenizer.action_token_end_idx
-    action_mask = get_current_action_mask(gt_tokens, action_begin, action_end)
+    action_mask = (gt_tokens >= action_begin) & (gt_tokens < action_end)
 
     metrics: Dict[str, float] = {}
     if action_mask.sum().item() > 0:
@@ -221,6 +226,27 @@ def _teacher_forced_metrics(
     else:
         metrics["teacher_forced_stop_acc"] = float("nan")
 
+    if compute_masked_denoise and mask_token_id is not None:
+        # Replace action tokens with mask token and recompute logits
+        masked_input_ids = input_ids.clone()
+        action_positions = (input_ids >= action_begin) & (input_ids < action_end)
+        masked_input_ids[action_positions] = mask_token_id
+        with torch.no_grad():
+            masked_out = _forward(masked_input_ids)
+        masked_logits = masked_out.logits[:, num_patches:-1, :]
+        masked_logits = masked_logits[:, :min_len]
+        masked_pred = masked_logits.argmax(dim=-1)
+        if action_mask.sum().item() > 0:
+            masked_action_logits = masked_logits[action_mask]
+            masked_targets = gt_tokens[action_mask]
+            masked_ce = F.cross_entropy(masked_action_logits, masked_targets, reduction="mean")
+            masked_acc = compute_token_accuracy(masked_pred, gt_tokens, action_mask)
+            metrics["masked_denoise_action_ce"] = float(masked_ce.item())
+            metrics["masked_denoise_action_acc"] = float(masked_acc.item())
+        else:
+            metrics["masked_denoise_action_ce"] = float("nan")
+            metrics["masked_denoise_action_acc"] = float("nan")
+
     return metrics
 
 
@@ -238,6 +264,7 @@ def _evaluate_checkpoint(
     center_crop: bool,
     use_proprio: bool,
     check_image_parity: bool,
+    mask_embed_override: str = "none",
 ) -> Dict[str, float]:
     cfg = SimpleNamespace(
         model_family="openvla",
@@ -262,6 +289,25 @@ def _evaluate_checkpoint(
     action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
     unnorm_key = _resolve_unnorm_key(vla, dataset_name)
     action_stats = vla.get_action_stats(unnorm_key)
+    mask_token_id = processor.tokenizer.mask_token_id
+    pad_token_id = processor.tokenizer.pad_token_id
+
+    # Optional mask embedding override (eval-only)
+    orig_mask_embed = None
+    orig_out_mask_embed = None
+    if mask_embed_override == "pad":
+        if mask_token_id is None or pad_token_id is None:
+            raise ValueError("mask_embed_override=pad requires mask_token_id and pad_token_id to be set.")
+        with torch.no_grad():
+            in_emb = vla.get_input_embeddings().weight
+            orig_mask_embed = in_emb[mask_token_id].detach().clone()
+            in_emb[mask_token_id].copy_(in_emb[pad_token_id])
+            out_emb = vla.get_output_embeddings()
+            if out_emb is None and hasattr(vla, "language_model"):
+                out_emb = vla.language_model.get_output_embeddings()
+            if out_emb is not None and hasattr(out_emb, "weight"):
+                orig_out_mask_embed = out_emb.weight[mask_token_id].detach().clone()
+                out_emb.weight[mask_token_id].copy_(out_emb.weight[pad_token_id])
 
     use_wrist_image = getattr(vla.vision_backbone, "get_num_images_in_input", lambda: 1)() > 1
     batch_transform = SanityBatchTransform(
@@ -304,6 +350,9 @@ def _evaluate_checkpoint(
     tf_acc_sum = 0.0
     tf_stop_sum = 0.0
     tf_count = 0
+    masked_ce_sum = 0.0
+    masked_acc_sum = 0.0
+    masked_count = 0
     count = 0
 
     data_iter = iter(dataset)
@@ -382,12 +431,18 @@ def _evaluate_checkpoint(
             proprio_projector=proprio_projector,
             use_proprio=use_proprio,
             dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
+            mask_token_id=mask_token_id,
+            compute_masked_denoise=True,
         )
         if not math.isnan(tf_metrics["teacher_forced_action_ce"]):
             tf_ce_sum += tf_metrics["teacher_forced_action_ce"]
             tf_acc_sum += tf_metrics["teacher_forced_action_acc"]
             tf_stop_sum += tf_metrics["teacher_forced_stop_acc"]
             tf_count += 1
+        if "masked_denoise_action_ce" in tf_metrics and not math.isnan(tf_metrics["masked_denoise_action_ce"]):
+            masked_ce_sum += tf_metrics["masked_denoise_action_ce"]
+            masked_acc_sum += tf_metrics["masked_denoise_action_acc"]
+            masked_count += 1
 
         dfm_stats = (debug or {}).get("dfm_stats", {})
         print(
@@ -395,6 +450,9 @@ def _evaluate_checkpoint(
             f"l2_norm={l2_norm:.4f} l2_unnorm={l2_unnorm:.4f} "
             f"tf_ce={tf_metrics['teacher_forced_action_ce']:.4f} "
             f"tf_acc={tf_metrics['teacher_forced_action_acc']:.4f} "
+            f"masked_ce={tf_metrics.get('masked_denoise_action_ce', float('nan')):.4f} "
+            f"masked_acc={tf_metrics.get('masked_denoise_action_acc', float('nan')):.4f} "
+            f"mask_embed_override={mask_embed_override} "
             f"dfm_decode_mode={dfm_stats.get('dfm_decode_mode')} "
             f"n_masked_init={dfm_stats.get('dfm_n_masked_initial')} "
             f"n_action_pos={dfm_stats.get('dfm_n_action_positions')}"
@@ -412,10 +470,27 @@ def _evaluate_checkpoint(
         summary["teacher_forced_action_ce"] = tf_ce_sum / tf_count
         summary["teacher_forced_action_acc"] = tf_acc_sum / tf_count
         summary["teacher_forced_stop_acc"] = tf_stop_sum / tf_count
+    if masked_count > 0:
+        summary["masked_denoise_action_ce"] = masked_ce_sum / masked_count
+        summary["masked_denoise_action_acc"] = masked_acc_sum / masked_count
+    summary["mask_embed_override"] = mask_embed_override
 
     print(f"\n=== {label} Summary ===")
     for k, v in summary.items():
-        print(f"{k}: {v:.6f}")
+        if isinstance(v, (int, float)):
+            print(f"{k}: {v:.6f}")
+        else:
+            print(f"{k}: {v}")
+    # Restore mask embedding if overridden
+    if mask_embed_override == "pad" and orig_mask_embed is not None:
+        with torch.no_grad():
+            in_emb = vla.get_input_embeddings().weight
+            in_emb[mask_token_id].copy_(orig_mask_embed)
+            out_emb = vla.get_output_embeddings()
+            if out_emb is None and hasattr(vla, "language_model"):
+                out_emb = vla.language_model.get_output_embeddings()
+            if orig_out_mask_embed is not None and out_emb is not None and hasattr(out_emb, "weight"):
+                out_emb.weight[mask_token_id].copy_(orig_out_mask_embed)
     return summary
 
 
@@ -431,6 +506,7 @@ def main() -> None:
     parser.add_argument("--compare_dd", type=str, default="False")
     parser.add_argument("--dd_checkpoint", type=str, default="")
     parser.add_argument("--dd_num_steps", type=int, default=64)
+    parser.add_argument("--mask_embed_override", type=str, default="none")
     parser.add_argument("--center_crop", type=str, default="True")
     parser.add_argument("--use_proprio", type=str, default="True")
     parser.add_argument("--check_image_parity", type=str, default="False")
@@ -451,6 +527,7 @@ def main() -> None:
         center_crop=_as_bool(args.center_crop),
         use_proprio=_as_bool(args.use_proprio),
         check_image_parity=check_image_parity,
+        mask_embed_override=args.mask_embed_override,
     )
 
     compare_dd = _as_bool(args.compare_dd) or bool(args.dd_checkpoint)

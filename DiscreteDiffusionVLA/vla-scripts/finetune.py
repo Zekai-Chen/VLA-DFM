@@ -999,12 +999,17 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # LoRA setup
     if cfg.use_lora:
+        lora_kwargs = {}
+        if cfg.use_discrete_flow_matching:
+            # Ensure mask/pad embeddings are trainable and saved in the adapter for DFM
+            lora_kwargs["modules_to_save"] = ["embed_tokens", "lm_head"]
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
             target_modules="all-linear",
             init_lora_weights="gaussian",
+            **lora_kwargs,
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
