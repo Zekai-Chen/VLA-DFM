@@ -237,7 +237,7 @@ start_job() {
       --use_film False \
       --center_crop True \
       --num_images_in_input 2 \
-      --num_open_loop_steps 1 \
+      --num_open_loop_steps 8 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
       --dfm_debug ${DFM_DEBUG} \
