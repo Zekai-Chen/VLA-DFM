@@ -62,6 +62,7 @@ which python
 python -V || true
 nvcc --version || true
 python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
+# python -c "import hashlib, os, pathlib; p=pathlib.Path('vla-scripts/finetune.py'); print('finetune.py sha256:', hashlib.sha256(p.read_bytes()).hexdigest()); print('finetune.py has _apply_finetune_cfg_to_model_config:', '_apply_finetune_cfg_to_model_config' in p.read_text()); print('DFM flags:', {k: os.environ.get(k) for k in ['USE_DFM','DFM_SCHEDULE','DFM_LOSS_MODE','DFM_TRAIN_MODE','DFM_TIME_EPS','DFM_T_MIN','DFM_T_MAX','DFM_WEIGHT_CLIP']})" || true
 
 export WANDB_CACHE_DIR=/projects/p32222/.cache
 export WANDB_MODE=online
