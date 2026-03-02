@@ -30,7 +30,7 @@ This report summarizes all **DFM/DD ablations, code changes, and results** discu
 
 | Run ID | Checkpoint Path | Train Script | Eval/Sanity Script | Decode | TM | L2N | L2U | TF CE | TF Acc | Masked CE | Masked Acc | Eval Success |
 |---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| **DD‑baseline‑3k** | *(not provided)* | *(not provided)* | *(eval script for DD baseline)* | *(DD)* | not provided | not provided | not provided | not provided | not provided | not provided | not provided | **~20% (user report)** |
+| **DD‑baseline‑3k** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/...--20260302_0220` | `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dd_3k.sh` | `dfm_sanity_check_slurm_smoke_2a100_dd.sh` | DD | 0.032 | 0.569 | 0.402 | 3.104 | 0.347 | n/a | n/a | **~20% (user report)** |
 | **DFM‑baseline‑A** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/...--20260228_2041` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k.sh` | `dfm_sanity_check_slurm_smoke_2a100.sh` | ctmc | 0.446 | 0.216 | 0.158 | 0.000 | 1.000 | not provided | not provided | 0% (eval logs) |
 | **DFM‑baseline‑B (CTMC)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/...--20260228_2041` | same as above | `dfm_sanity_check_slurm_smoke_2a100.sh` | ctmc | 0.157 | 0.363 | 0.234 | not provided | not provided | not provided | not provided | 0% (eval logs) |
 | **DFM‑baseline‑C (maskpad override)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/...--20260228_2041` | same as above | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | ctmc | 0.054 | 0.713 | 0.398 | 1.683 | 0.583 | 4.936 | 0.167 | 0% (eval logs) |
@@ -151,6 +151,11 @@ Notes:
 - **Primary change:** `--dfm_t_max 0.9` with `--dfm_maskgit_num_steps 12` and `mask_embed_override=pad`.
 - **Outcome:** TF acc ~0.758, masked acc ~0.420, token_match ~0.339, L2_unnorm ~0.372.
 - **Interpretation:** Masked‑denoise accuracy improves versus the no‑maskpad tmax=0.9 run (~0.33 → ~0.42) and is comparable to maskpad tmax=0.7 (~0.40), but remains **below** the no‑maskpad tmax=0.7 peak (~0.45). This suggests maskpad can help at **tmax=0.9**, but does **not** beat the best no‑maskpad setting.
+
+### 3.20 DD baseline (3k, 20260302_0220)
+- **Training config:** `use_discrete_diffusion=True`, 3k steps, same dataset/optimizer settings as DFM runs.
+- **Outcome (sanity):** token_match ~0.032, L2_unnorm ~0.402, TF acc ~0.347 (TF CE ~3.104). Masked‑denoise metrics are **not applicable** for DD (reported as `nan`).
+- **Interpretation:** Teacher‑forced accuracy on DD is **low** compared to DFM runs, but DD still achieved **~20% success** in eval (per user report). This highlights that **DD’s sampling path can still perform** even when TF metrics are weak, while DFM depends heavily on masked‑denoise quality.
 
 ---
 
