@@ -31,6 +31,12 @@ We also provide support for LIBERO in [libero_NPU](https://github.com/Liang-ZX/D
 Please refer to [finetune.sh](finetune.sh) and [finetune_from_ckpt.sh](finetune_from_ckpt.sh) for finetuning.
 We fine-tuned OpenVLA via LoRA (r=32) on four LIBERO task suites: LIBERO-Spatial, LIBERO-Object, LIBERO-Goal, and LIBERO-10 (also called LIBERO-Long).
 
+### SLURM smoke scripts (20k)
+- DFM finetune (tmax sweep): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dfm_flow_20k_maskgit_tmax_sweep.sh`
+- DFM eval (best MaskGIT tmax=0.7): `sbatch/smoke/eval_libero_slurm_smoke_2a100_dfm_flow_best_maskgit_tmax0.7.sh`
+- DD finetune (20k): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dd_20k.sh`
+- DD eval: `sbatch/smoke/eval_libero_slurm_smoke_2a100_discrete_diffusion.sh`
+
 And please refer to [scripts/eval_libero_object_batch.sh](scripts/eval_libero_object_batch.sh) for evaluation.
 Notes:
 * The evaluation script will run 500 trials by default (10 tasks x 50 episodes each). You can modify the number of
