@@ -19,6 +19,7 @@ def dfm_decode(
     num_steps: int = 12,
     maskgit_num_steps: int = 12,
     schedule: str = "cosine",
+    maskgit_schedule: str = "cosine",
     temperature: float = 1.0,
     temperature_anneal: str = "none",
     adaptive_step: bool = True,
@@ -68,10 +69,47 @@ def dfm_decode(
     if decode_mode == "maskgit":
         if maskgit_num_steps <= 0:
             raise ValueError(f"maskgit_num_steps must be > 0, got {maskgit_num_steps}")
-        t_grid = torch.linspace(0.0, 1.0, maskgit_num_steps, device=device)
-        dt_grid = torch.zeros_like(t_grid)
+
+        final_iters, actions_hidden_states, pd_stats = parallel_decode.decode(
+            init_ids=cur,
+            tokens_to_logits=tokens_to_logits,
+            mask_token_id=mask_token_id,
+            num_iter=maskgit_num_steps,
+            choice_temperature=temperature,
+            mask_scheduling_method=maskgit_schedule,
+            use_remask=True,
+            clamp_mask=clamp_mask,
+            clamp_values=clamp_values,
+            return_stats=True,
+        )
+        final_ids = final_iters[:, -1, :]
+
+        dfm_mask_frac_final = (final_ids == mask_token_id).float().mean().item()
+        dfm_unresolved_final = ((final_ids == mask_token_id) & (~clamp_mask)).sum().item()
+
+        stats = {
+            "dfm_nfe_realized": pd_stats.get("nfe_realized", maskgit_num_steps),
+            "dfm_early_exit_iter": -1,
+            "dfm_dt_safe_hits": 0,
+            "dfm_dt_under_min": 0,
+            "dfm_num_changed_tokens": pd_stats.get("step_changed_count", []),
+            "dfm_step_changed_count": pd_stats.get("step_changed_count", []),
+            "dfm_mask_frac_final": dfm_mask_frac_final,
+            "dfm_unresolved_final": dfm_unresolved_final,
+            "dfm_decode_mode": decode_mode,
+            "dfm_n_action_positions": n_action_positions,
+            "dfm_n_masked_initial": n_masked_initial,
+            "dfm_step_masked_count": pd_stats.get("step_masked_count", []),
+            "dfm_maskgit_num_steps": maskgit_num_steps,
+        }
+        if debug_level >= 1:
+            stats["dfm_unresolved_count"] = pd_stats.get("step_masked_count", [])
+            stats["dfm_mask_len_per_step"] = pd_stats.get("mask_len_per_step", [])
+
+        return final_ids, actions_hidden_states, stats
     else:
         t_grid, dt_grid = time_grid(num_steps, eps=time_eps, device=device)
+        num_iter = int(t_grid.numel())
 
     actions_hidden_states = None
     num_changed_per_step = []
@@ -84,11 +122,8 @@ def dfm_decode(
     dt_under_min = 0
     early_exit_iter = -1
 
-    unknown_init = None
-    if decode_mode == "maskgit":
-        unknown_init = ((init_ids == mask_token_id) & (~clamp_mask)).sum(dim=1)
-
-    for step, t in enumerate(t_grid):
+    for step in range(num_iter):
+        t = t_grid[step]
         # Exit if no unresolved positions remain
         unresolved = (cur == mask_token_id) & (~clamp_mask)
         if debug_level >= 1:
@@ -119,111 +154,62 @@ def dfm_decode(
         flat_probs = probs.view(-1, probs.size(-1))
         sampled_flat = torch.multinomial(flat_probs, 1).view(cur.shape)
 
-        if decode_mode == "ctmc":
-            # Hazard rate (scalar per step for mixture path)
-            kappa_t = kappa(t, schedule=schedule)
-            kdot_t = kappa_dot(t, schedule=schedule)
-            denom = (1.0 - kappa_t).clamp(min=1e-8)
-            hazard = (kdot_t / denom).clamp(min=0.0)
+        # Hazard rate (scalar per step for mixture path)
+        kappa_t = kappa(t, schedule=schedule)
+        kdot_t = kappa_dot(t, schedule=schedule)
+        denom = (1.0 - kappa_t).clamp(min=1e-8)
+        hazard = (kdot_t / denom).clamp(min=0.0)
 
-            # Step size with safety precedence
-            remaining_time = (1.0 - time_eps) - t
-            h = dt_grid[step]
-            if adaptive_step:
-                safe_h = (1.0 - kappa_t) / kdot_t.clamp(min=1e-8)
-                h = torch.minimum(h, safe_h)
-                if (safe_h <= h).item():
-                    dt_safe_hits += 1
-            h = torch.minimum(h, torch.tensor(step_max, device=device))
-            h = torch.minimum(h, remaining_time)
-            if h < step_min:
-                safe_cap = (
-                    (1.0 - kappa_t) / kdot_t.clamp(min=1e-8)
-                    if adaptive_step
-                    else torch.tensor(step_min, device=device)
-                )
-                if (step_min <= remaining_time) and (step_min <= safe_cap):
-                    h = torch.tensor(step_min, device=device)
-                else:
-                    dt_under_min += 1
+        # Step size with safety precedence
+        remaining_time = (1.0 - time_eps) - t
+        h = dt_grid[step]
+        if adaptive_step:
+            safe_h = (1.0 - kappa_t) / kdot_t.clamp(min=1e-8)
+            h = torch.minimum(h, safe_h)
+            if (safe_h <= h).item():
+                dt_safe_hits += 1
+        h = torch.minimum(h, torch.tensor(step_max, device=device))
+        h = torch.minimum(h, remaining_time)
+        if h < step_min:
+            safe_cap = (
+                (1.0 - kappa_t) / kdot_t.clamp(min=1e-8)
+                if adaptive_step
+                else torch.tensor(step_min, device=device)
+            )
+            if (step_min <= remaining_time) and (step_min <= safe_cap):
+                h = torch.tensor(step_min, device=device)
+            else:
+                dt_under_min += 1
 
-            # Update probability for CTMC jump
-            p_update = 1.0 - torch.exp(-h * hazard)
-            p_update = p_update.clamp(min=0.0, max=1.0)
-            if debug_level >= 2:
-                debug_p_update.append(
-                    {
-                        "mean": float(p_update.item()),
-                        "min": float(p_update.item()),
-                        "max": float(p_update.item()),
-                    }
-                )
-                debug_unresolved.append(int(unresolved.sum().item()))
-                top1_probs = probs.max(dim=-1).values
-                if unresolved.any():
-                    debug_top1_prob.append(float(top1_probs[unresolved].mean().item()))
-                else:
-                    debug_top1_prob.append(0.0)
-            # Broadcast to [B, L]
-            update_mask = torch.rand_like(cur.float()) < p_update
-            update_mask = update_mask & (sampled_flat != cur) & (~clamp_mask)
-            # Only update unresolved (masked) positions to match training corruption
-            update_mask = update_mask & unresolved
+        # Update probability for CTMC jump
+        p_update = 1.0 - torch.exp(-h * hazard)
+        p_update = p_update.clamp(min=0.0, max=1.0)
+        if debug_level >= 2:
+            debug_p_update.append(
+                {
+                    "mean": float(p_update.item()),
+                    "min": float(p_update.item()),
+                    "max": float(p_update.item()),
+                }
+            )
+            debug_unresolved.append(int(unresolved.sum().item()))
+            top1_probs = probs.max(dim=-1).values
+            if unresolved.any():
+                debug_top1_prob.append(float(top1_probs[unresolved].mean().item()))
+            else:
+                debug_top1_prob.append(0.0)
+        # Broadcast to [B, L]
+        update_mask = torch.rand_like(cur.float()) < p_update
+        update_mask = update_mask & (sampled_flat != cur) & (~clamp_mask)
+        # Only update unresolved (masked) positions to match training corruption
+        update_mask = update_mask & unresolved
 
-            cur = torch.where(update_mask, sampled_flat, cur)
-            if clamp_values is not None:
-                cur = torch.where(clamp_mask, clamp_values, cur)
+        cur = torch.where(update_mask, sampled_flat, cur)
+        if clamp_values is not None:
+            cur = torch.where(clamp_mask, clamp_values, cur)
 
-            num_changed = update_mask.sum().item()
-            num_changed_per_step.append(num_changed)
-        else:
-            # MaskGIT-style refinement driven by kappa(t) schedule (diffusion-like)
-            kappa_t = kappa(t, schedule=schedule)
-            mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
-            unresolved_count = unresolved.sum(dim=1)
-            total_unknown = unknown_init.to(unresolved_count.device)
-            mask_len = torch.round(total_unknown.float() * mask_ratio).long()
-            mask_len = torch.maximum(mask_len, torch.zeros_like(mask_len))
-            mask_len = torch.minimum(mask_len, total_unknown)
-            if debug_level >= 1:
-                mask_len_per_step.append(mask_len.detach().cpu().tolist())
-
-            if debug_level >= 2:
-                debug_unresolved.append(int(unresolved.sum().item()))
-                top1_probs = probs.max(dim=-1).values
-                if unresolved.any():
-                    debug_top1_prob.append(float(top1_probs[unresolved].mean().item()))
-                else:
-                    debug_top1_prob.append(0.0)
-
-            prev_cur = cur
-            proposal = torch.where(unresolved, sampled_flat, cur)
-            conf_all = probs.gather(2, proposal.unsqueeze(-1)).squeeze(-1)
-            inf = torch.tensor(float("inf"), device=conf_all.device)
-            conf_all = torch.where(clamp_mask, inf, conf_all)
-
-            masking = torch.zeros_like(unresolved)
-            if (total_unknown > 0).any():
-                # Rows where mask_len == 0 -> fully resolve (all False)
-                zero_rows = (mask_len == 0)
-                # Rows where mask_len >= total_unknown -> keep all action positions masked
-                full_rows = (mask_len >= total_unknown) & (total_unknown > 0)
-                if full_rows.any():
-                    masking = torch.where(full_rows.unsqueeze(1), ~clamp_mask, masking)
-                # Remaining rows -> MaskGIT-style random top-k over confidence
-                mid_rows = (~zero_rows) & (~full_rows) & (total_unknown > 0)
-                if mid_rows.any():
-                    mask_len_for_fn = torch.clamp(mask_len, min=1, max=conf_all.shape[1] - 1)
-                    masking_all = parallel_decode.mask_by_random_topk(conf_all, mask_len_for_fn, temperature=1.0)
-                    masking = torch.where(mid_rows.unsqueeze(1), masking_all, masking)
-
-            cur = proposal
-            cur = torch.where(masking, mask_token_id, cur)
-            if clamp_values is not None:
-                cur = torch.where(clamp_mask, clamp_values, cur)
-
-            num_changed = (cur != prev_cur).sum().item()
-            num_changed_per_step.append(num_changed)
+        num_changed = update_mask.sum().item()
+        num_changed_per_step.append(num_changed)
 
         if early_exit and early_exit_frac > 0.0:
             num_free = (~clamp_mask).sum().item()
@@ -266,6 +252,8 @@ def dfm_decode(
                 choice_temperature=temperature,
                 mask_scheduling_method=mask_schedule_method,
                 use_remask=True,
+                clamp_mask=clamp_mask,
+                clamp_values=clamp_values,
             )
             cur = corrected[:, -1, :]
             if clamp_values is not None:
