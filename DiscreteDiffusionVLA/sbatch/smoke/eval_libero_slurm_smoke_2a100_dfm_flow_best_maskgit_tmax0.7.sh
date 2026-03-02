@@ -75,14 +75,17 @@ mkdir -p "$LOG_DIR"
 CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-tmax0.7--20260302_0118"
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
-DFM_DEBUG=${DFM_DEBUG:-False}
+DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
-DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-12}
 DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-12}
+DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-cosine}
+DFM_TEMPERATURE=${DFM_TEMPERATURE:-0.0}
 DFM_SCHEDULE=${DFM_SCHEDULE:-}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
+NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-1}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -238,7 +241,7 @@ start_job() {
       --use_film False \
       --center_crop True \
       --num_images_in_input 2 \
-      --num_open_loop_steps 8 \
+      --num_open_loop_steps ${NUM_OPEN_LOOP_STEPS} \
       --use_proprio True \
       --topk_filter_thres 0.0 \
       --dfm_debug ${DFM_DEBUG} \
@@ -246,7 +249,9 @@ start_job() {
       --dfm_fail_fast ${DFM_FAIL_FAST} \
       --dfm_num_steps ${DFM_NUM_STEPS} \
       --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
+      --dfm_maskgit_schedule ${DFM_MASKGIT_SCHEDULE} \
       --dfm_schedule ${DFM_SCHEDULE} \
+      --dfm_temperature ${DFM_TEMPERATURE} \
       --dfm_early_exit ${DFM_EARLY_EXIT} \
       --dfm_decode_mode ${DFM_DECODE_MODE} \
       --local_log_dir "${LOG_DIR}" \

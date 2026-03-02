@@ -68,7 +68,9 @@ DATA_ROOT="/scratch/ywn1043/VLA-DFM/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
 NUM_BATCHES=${NUM_BATCHES:-5}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
-DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-12}
+DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-12}
+DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-cosine}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 CHECK_IMAGE_PARITY=${CHECK_IMAGE_PARITY:-True}
 
@@ -83,6 +85,8 @@ python "${REPO_ROOT}/scripts/dfm_sanity_check.py" \
   --num_batches "${NUM_BATCHES}" \
   --dfm_decode_mode "${DFM_DECODE_MODE}" \
   --dfm_num_steps "${DFM_NUM_STEPS}" \
+  --dfm_maskgit_num_steps "${DFM_MASKGIT_NUM_STEPS}" \
+  --dfm_maskgit_schedule "${DFM_MASKGIT_SCHEDULE}" \
   --dfm_early_exit "${DFM_EARLY_EXIT}" \
   --check_image_parity "${CHECK_IMAGE_PARITY}" \
   > "${LOG_DIR}/dfm_sanity.log" 2>&1
