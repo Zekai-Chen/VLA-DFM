@@ -96,6 +96,7 @@ class PrismaticConfig(PretrainedConfig):
         dfm_weight_clip: float = 20.0,
         dfm_train_mode: str = "flow",
         dfm_maskgit_num_steps: int = 12,
+        dfm_maskgit_schedule: str = "cosine",
         pad_to_multiple_of: int = 64,
         output_projector_states: bool = False,
         **kwargs: str,
@@ -140,6 +141,7 @@ class PrismaticConfig(PretrainedConfig):
         self.dfm_weight_clip = dfm_weight_clip
         self.dfm_train_mode = dfm_train_mode
         self.dfm_maskgit_num_steps = dfm_maskgit_num_steps
+        self.dfm_maskgit_schedule = dfm_maskgit_schedule
 
         # [IMPORTANT] HF Utilities actually look for a `text_config` field... we need to use that specific naming!
         self.text_config = (
