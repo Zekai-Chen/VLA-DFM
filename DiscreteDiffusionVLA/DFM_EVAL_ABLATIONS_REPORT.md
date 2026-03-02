@@ -52,6 +52,7 @@ This report summarizes all **DFM/DD ablations, code changes, and results** discu
 | **DFM‑tmax=0.8 (maskpad, maskgit, 12 steps)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.8/...--20260302_0143` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskgit_tmax_sweep.sh` (tmax=0.8) | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | maskgit | 0.161 | 0.560 | 0.390 | 0.408 | 0.958 | 3.766 | 0.357 | 0% (implied) |
 | **DFM‑tmax=0.9 (no‑maskpad, maskgit, 12 steps)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.9/...--20260302_0217` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskgit_tmax_sweep.sh` (tmax=0.9) | `dfm_sanity_check_slurm_smoke_2a100.sh` | maskgit | 0.246 | 0.433 | 0.368 | 1.269 | 0.725 | 3.525 | 0.329 | 0% (implied) |
 | **DFM‑tmax=0.9 (maskpad, maskgit, 12 steps)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.9/...--20260302_0217` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskgit_tmax_sweep.sh` (tmax=0.9) | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | maskgit | 0.339 | 0.474 | 0.372 | 1.232 | 0.758 | 3.277 | 0.420 | 0% (implied) |
+| **DFM‑sanity‑maskgit (latest)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.9/...--20260302_0217` | not provided | `dfm_sanity_check_slurm_smoke_2a100.sh` | maskgit | 0.225 | 0.402 | 0.321 | 0.278 | 0.923 | 4.106 | 0.266 | not provided |
 | **DFM‑tmax=0.7 (maskpad, maskgit, 12 steps)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.7/...--20260302_0104` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskgit_tmax_sweep.sh` (tmax=0.7) | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | maskgit | 0.300 | 0.457 | 0.341 | 1.087 | 0.735 | 3.361 | 0.401 | 0% (implied) |
 
 Notes:
@@ -157,6 +158,11 @@ Notes:
 - **Outcome (sanity):** token_match ~0.032, L2_unnorm ~0.402, TF acc ~0.347 (TF CE ~3.104). Masked‑denoise metrics are **not applicable** for DD (reported as `nan`).
 - **Interpretation:** Teacher‑forced accuracy on DD is **low** compared to DFM runs, but DD still achieved **~20% success** in eval (per user report). This highlights that **DD’s sampling path can still perform** even when TF metrics are weak, while DFM depends heavily on masked‑denoise quality.
 
+### 3.21 DFM sanity (latest, maskgit, no‑maskpad)
+- **Checkpoint:** `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask-tmax0.9/...--20260302_0217`
+- **Outcome:** TF acc ~0.923, masked acc ~0.266, token_match ~0.225, L2_unnorm ~0.321.
+- **Interpretation:** Despite strong teacher‑forced accuracy, masked‑denoise accuracy is **low** (~0.27), indicating the model still struggles to recover from fully masked action spans. This remains below the best MaskGIT/no‑maskpad run (~0.45), so **mask‑conditioning weakness persists**.
+
 ---
 
 ## 4) Code Changes Inventory (Grouped by Area)
@@ -259,8 +265,7 @@ Changes:
 
 **DFM (multiple runs)**
 - Eval success ≈ 0% across multiple checkpoints.
-- Teacher‑forced acc often **high**, while masked‑denoise acc is **generally low** but varies: **~0.46 with maskpad+CTMC**, **~0.45 with MaskGIT/no‑maskpad at tmax=0.7 (12 steps)**, **~0.40 with MaskGIT+maskpad at tmax=0.7 (12 steps)**, **~0.37 with MaskGIT/no‑maskpad (12 steps)**, **~0.37 with MaskGIT/no‑maskpad at tmax=0.8**, **~0.36 with MaskGIT+maskpad at tmax=0.8**, **~0.31 with MaskGIT/no‑maskpad at tmax=0.6**, **~0.29 with MaskGIT+maskpad (12 steps)**, **~0.26 with MaskGIT+maskpad at tmax=0.6**, **~0.25 with CTMC/no‑maskpad**, and **~0.18 with MaskGIT+maskpad (older run)**.
-- Teacher‑forced acc often **high**, while masked‑denoise acc is **generally low** but varies: **~0.46 with maskpad+CTMC**, **~0.45 with MaskGIT/no‑maskpad at tmax=0.7 (12 steps)**, **~0.42 with MaskGIT+maskpad at tmax=0.9**, **~0.40 with MaskGIT+maskpad at tmax=0.7 (12 steps)**, **~0.37 with MaskGIT/no‑maskpad (12 steps)**, **~0.37 with MaskGIT/no‑maskpad at tmax=0.8**, **~0.36 with MaskGIT+maskpad at tmax=0.8**, **~0.33 with MaskGIT/no‑maskpad at tmax=0.9**, **~0.31 with MaskGIT/no‑maskpad at tmax=0.6**, **~0.29 with MaskGIT+maskpad (12 steps)**, **~0.26 with MaskGIT+maskpad at tmax=0.6**, **~0.25 with CTMC/no‑maskpad**, and **~0.18 with MaskGIT+maskpad (older run)**.
+- Teacher‑forced acc often **high**, while masked‑denoise acc is **generally low** but varies: **~0.46 with maskpad+CTMC**, **~0.45 with MaskGIT/no‑maskpad at tmax=0.7 (12 steps)**, **~0.42 with MaskGIT+maskpad at tmax=0.9**, **~0.40 with MaskGIT+maskpad at tmax=0.7 (12 steps)**, **~0.37 with MaskGIT/no‑maskpad (12 steps)**, **~0.37 with MaskGIT/no‑maskpad at tmax=0.8**, **~0.36 with MaskGIT+maskpad at tmax=0.8**, **~0.33 with MaskGIT/no‑maskpad at tmax=0.9**, **~0.31 with MaskGIT/no‑maskpad at tmax=0.6**, **~0.29 with MaskGIT+maskpad (12 steps)**, **~0.27 with MaskGIT/no‑maskpad (latest sanity run)**, **~0.26 with MaskGIT+maskpad at tmax=0.6**, **~0.25 with CTMC/no‑maskpad**, and **~0.18 with MaskGIT+maskpad (older run)**.
 - Indicates **mask conditioning weakness** remains the dominant issue even after MaskGIT decode fixes.
 
 ---

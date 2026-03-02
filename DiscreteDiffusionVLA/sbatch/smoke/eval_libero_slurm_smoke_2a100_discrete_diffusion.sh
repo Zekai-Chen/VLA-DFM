@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b2+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100--20260227_0016"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-3k--20260302_0220"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 
@@ -86,8 +86,7 @@ for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 
 # Evaluate a small set of checkpoints
 STEPS=(
-  1000
-  2000
+  3000
 )
 
 declare -a JOB_PIDS
