@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke_dfm_clone/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260228_2041"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260301_2133"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
