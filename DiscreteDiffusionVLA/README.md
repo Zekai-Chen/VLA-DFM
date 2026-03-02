@@ -33,6 +33,7 @@ We fine-tuned OpenVLA via LoRA (r=32) on four LIBERO task suites: LIBERO-Spatial
 
 ### SLURM smoke scripts (20k)
 - DFM finetune (tmax sweep): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dfm_flow_20k_maskgit_tmax_sweep.sh`
+- DFM finetune (tmax=0.7): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dfm_flow_20k_tmax0.7.sh`
 - DFM eval (best MaskGIT tmax=0.7): `sbatch/smoke/eval_libero_slurm_smoke_2a100_dfm_flow_best_maskgit_tmax0.7.sh`
 - DD finetune (20k): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dd_20k.sh`
 - DD eval: `sbatch/smoke/eval_libero_slurm_smoke_2a100_discrete_diffusion.sh`
