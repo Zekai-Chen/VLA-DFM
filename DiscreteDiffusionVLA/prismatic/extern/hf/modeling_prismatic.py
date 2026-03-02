@@ -36,7 +36,6 @@ from prismatic.training.train_utils import (
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
-    ACTION_TOKEN_BEGIN_IDX,
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     STOP_INDEX,
@@ -372,6 +371,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         self.use_discrete_diffusion = config.use_discrete_diffusion
         self.use_discrete_flow_matching = getattr(config, "use_discrete_flow_matching", False)
         self.mask_token_id = config.mask_token_id
+        self.action_vocab_anchor = getattr(config, "action_vocab_anchor", "pad")
 
         if self.use_discrete_diffusion and self.use_discrete_flow_matching:
             raise ValueError("Cannot enable both discrete diffusion and discrete flow matching.")
@@ -379,6 +379,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = config.pad_token_id
         self.llm_dim = config.text_config.hidden_size
+
+        # Validate action vocab range configuration (pad anchor only).
+        self._validate_action_vocab()
 
         # HF Boilerplate =>> initializes weights via `_init_weights()` and sets gradient checkpointing
         self.post_init()
@@ -452,12 +455,64 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return new_input_embeddings
 
+    def _action_vocab_range(self) -> Tuple[int, int, int]:
+        """Return (action_begin, action_end, n_bins) for current config."""
+        n_bins = getattr(self.config, "n_action_bins", None)
+        if n_bins is None and hasattr(self, "bin_centers"):
+            n_bins = int(self.bin_centers.shape[0])
+        if n_bins is None:
+            raise ValueError("n_action_bins must be set on config or via bin_centers.")
+        n_bins = int(n_bins)
+        anchor = getattr(self.config, "action_vocab_anchor", "pad")
+        if anchor == "pad":
+            action_end = int(self.pad_token_id)
+        elif anchor == "vocab_size":
+            action_end = int(self.vocab_size)
+        else:
+            raise ValueError(f"Unknown action_vocab_anchor: {anchor}")
+        action_begin = int(action_end - n_bins)
+        return action_begin, action_end, n_bins
+
+    def _validate_action_vocab(self) -> None:
+        """Validate that special tokens do not overlap action bins."""
+        if not hasattr(self.config, "n_action_bins") and not hasattr(self, "bin_centers"):
+            return
+        action_begin, action_end, _ = self._action_vocab_range()
+        if action_begin < 0:
+            raise ValueError(f"Action vocab begin ({action_begin}) is negative; check n_action_bins/pad_token_id.")
+        anchor = getattr(self.config, "action_vocab_anchor", "pad")
+        if anchor == "pad":
+            if action_begin <= self.pad_token_id < action_end:
+                raise ValueError(
+                    f"pad_token_id ({self.pad_token_id}) overlaps action range [{action_begin}, {action_end})."
+                )
+            if action_begin <= self.mask_token_id < action_end:
+                raise ValueError(
+                    f"mask_token_id ({self.mask_token_id}) overlaps action range [{action_begin}, {action_end})."
+                )
+
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""
-        current_action_mask = get_current_action_mask(labels)
-        next_actions_mask = get_next_actions_mask(labels)
+        action_begin, action_end, _ = self._action_vocab_range()
+        current_action_mask = get_current_action_mask(labels, action_begin, action_end)
+        next_actions_mask = get_next_actions_mask(labels, action_begin, action_end)
         all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
         return all_actions_mask
+
+    def _compute_language_embeddings(self, input_embeddings, attention_mask, all_actions_mask):
+        """Compute a safe language embedding summary for FiLM conditioning."""
+        if attention_mask is None:
+            attention_mask = input_embeddings.new_ones(input_embeddings.shape[:2], dtype=torch.bool)
+        else:
+            attention_mask = attention_mask.to(dtype=torch.bool)
+
+        language_mask = attention_mask & (~all_actions_mask)
+        if not torch.any(language_mask):
+            return input_embeddings.new_zeros((input_embeddings.shape[0], 1, input_embeddings.shape[2]))
+
+        denom = language_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+        summed = (input_embeddings * language_mask.unsqueeze(-1)).sum(dim=1)
+        return (summed / denom).unsqueeze(1)
 
     def _process_vision_features(self, pixel_values, language_embeddings=None, use_film=False):
         """Process vision features with optional FiLM conditioning"""
@@ -518,6 +573,35 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             )
             return torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
         return None
+
+    @staticmethod
+    def _build_multimodal_token_ids(token_ids, projected_patch_embeddings, patch_fill_id: int = 0):
+        """Build multimodal token IDs with patch fill tokens inserted after BOS."""
+        if token_ids is None:
+            return None
+        patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
+        if patch_len > 0:
+            patch_ids = torch.full(
+                (token_ids.shape[0], patch_len),
+                fill_value=patch_fill_id,
+                dtype=token_ids.dtype,
+                device=token_ids.device,
+            )
+            return torch.cat([token_ids[:, :1], patch_ids, token_ids[:, 1:]], dim=1)
+        return token_ids
+
+    @staticmethod
+    def _expand_mask_with_patches(mask, projected_patch_embeddings):
+        """Expand a (B, L) mask to include patch positions after BOS."""
+        if mask is None:
+            return None
+        patch_len = projected_patch_embeddings.shape[1] if projected_patch_embeddings is not None else 0
+        if patch_len > 0:
+            patch_mask = torch.zeros(
+                (mask.shape[0], patch_len), device=mask.device, dtype=mask.dtype
+            )
+            return torch.cat([mask[:, :1], patch_mask, mask[:, 1:]], dim=1)
+        return mask
 
     def _get_eos_pos(self, all_actions_mask):
         """Prepare loss mask for discrete diffusion"""
@@ -631,6 +715,13 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask
 
+    @staticmethod
+    def _sample_mixture_mask(loss_mask_full: torch.BoolTensor, kappa_t: torch.Tensor) -> torch.BoolTensor:
+        """Sample per-coordinate Bernoulli mask for mixture path corruption."""
+        p_mask = (1.0 - kappa_t).view(-1, 1)  # (B, 1)
+        rand = torch.rand(loss_mask_full.shape, device=loss_mask_full.device)
+        return (rand < p_mask) & loss_mask_full
+
     def apply_mask_flow_matching(
         self,
         input_ids: torch.LongTensor,                 # (B, L)
@@ -650,8 +741,6 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         B, L = input_ids.shape
         device = input_ids.device
 
-        total_unknown = loss_mask_full.float().sum(dim=1)  # (B,)
-
         # Sample time t in [t_min, t_max], clamped to (eps, 1-eps)
         t_low = max(t_min, time_eps)
         t_high = min(t_max, 1.0 - time_eps)
@@ -661,16 +750,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         kappa_t = kappa(t, schedule=schedule)
         kdot_t = kappa_dot(t, schedule=schedule)
 
-        mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
-        num_mask = torch.clamp((total_unknown * mask_ratio).round(), min=1).long()
-
-        # Random scores for masking selection
-        vals = torch.rand(B, L, device=device)
-        large = float("inf")
-        vals = torch.where(loss_mask_full, vals, vals + large)
-        perm = vals.argsort(dim=1)
-        ranks = perm.argsort(dim=1)
-        masked_mask = ranks < num_mask[:, None]
+        masked_mask = self._sample_mixture_mask(loss_mask_full, kappa_t)
 
         ignore_labels = torch.full_like(labels, fill_value=IGNORE_INDEX, dtype=labels.dtype, device=device)
         masked_labels = torch.where(masked_mask, labels, ignore_labels)
@@ -685,6 +765,51 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         loss_mask = masked_mask.float()
 
         return masked_input_ids, masked_input_embeddings, masked_labels, loss_mask, kappa_t, kdot_t, t
+
+    @staticmethod
+    def _dfm_generalized_kl_loss(
+        *,
+        shift_logits: torch.Tensor,          # (B, T-1, V_full)
+        x1: torch.Tensor,                    # (B, T-1)
+        xt: torch.Tensor,                    # (B, T-1)
+        action_mask: torch.Tensor,           # (B, T-1)
+        kappa_t: torch.Tensor,               # (B,)
+        kdot_t: torch.Tensor,                # (B,)
+        action_begin: int,
+        action_end: int,
+        mask_id: int,
+        weight_clip: float = 20.0,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """Generalized-KL loss for mixture path on action coordinates."""
+        B, _, _ = shift_logits.shape
+        am = action_mask.bool()
+
+        action_ids = torch.arange(action_begin, action_end, device=shift_logits.device)
+        allowed_ids = torch.cat([action_ids, torch.tensor([mask_id], device=shift_logits.device)], dim=0)
+        K = allowed_ids.numel()
+
+        logits = shift_logits.index_select(dim=-1, index=allowed_ids)
+
+        x1_safe = torch.where(am, x1, torch.full_like(x1, action_begin))
+        xt_safe = torch.where(am, xt, torch.full_like(xt, action_begin))
+
+        x1_idx = x1_safe - action_begin
+        xt_idx = torch.where(xt_safe == mask_id, torch.full_like(xt_safe, K - 1), xt_safe - action_begin)
+
+        log_p = torch.log_softmax(logits, dim=-1)
+        log_p_x1 = log_p.gather(-1, x1_idx.unsqueeze(-1)).squeeze(-1)
+        log_p_xt = log_p.gather(-1, xt_idx.unsqueeze(-1)).squeeze(-1)
+        p_xt = torch.exp(log_p_xt)
+
+        delta = (xt_safe == x1_safe).to(log_p.dtype)
+
+        denom = (1.0 - kappa_t).clamp(min=eps)
+        w = (kdot_t / denom).clamp(min=0.0, max=weight_clip).view(B, 1)
+
+        loss_pos = -w * (p_xt - delta + (1.0 - delta) * log_p_x1)
+
+        return (loss_pos * am).sum() / am.sum().clamp(min=1.0)
 
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
@@ -733,6 +858,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_stats = None
         dfm_action_token_count = None
         dfm_t = None
+        multimodal_x1_labels = None
+        multimodal_xt_ids = None
+        multimodal_actions_mask = None
 
         # Resolve DFM defaults
         dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
@@ -786,10 +914,12 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             # Extract action masks
             all_actions_mask = self._process_action_masks(labels)
 
-            # Extract the language portion of the input embeddings (i.e. remove the action tokens portion)
-            language_embeddings = input_embeddings[~all_actions_mask].reshape(
-                input_embeddings.shape[0], -1, input_embeddings.shape[2]
-            )  # (B, lang_seq_len, llm_dim)
+            # Extract a safe language summary for FiLM conditioning
+            language_embeddings = None
+            if use_film:
+                language_embeddings = self._compute_language_embeddings(
+                    input_embeddings, attention_mask, all_actions_mask
+                )  # (B, 1, llm_dim)
 
             # Get visual features  pixel_values [8, 12, 224, 224]
             projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -843,6 +973,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 labels[torch.arange(labels.shape[0]), eos_pos] = STOP_INDEX
 
             elif self.use_discrete_flow_matching:
+                labels_x1 = labels.clone() if labels is not None else None
                 loss_mask_full = all_actions_mask
                 dfm_action_token_count = loss_mask_full.sum(dim=1)
                 if dfm_train_mode == "diffusion_like":
@@ -963,6 +1094,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
             # Build labels for multimodal sequence if needed  # labels shape [8, 93]
             multimodal_labels = self._build_multimodal_labels(labels, projected_patch_embeddings)
+            if self.use_discrete_flow_matching and labels_x1 is not None:
+                multimodal_x1_labels = self._build_multimodal_labels(labels_x1, projected_patch_embeddings)
+                multimodal_xt_ids = self._build_multimodal_token_ids(
+                    input_ids, projected_patch_embeddings, patch_fill_id=0
+                )
+                multimodal_actions_mask = self._expand_mask_with_patches(all_actions_mask, projected_patch_embeddings)
+                if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
+                    if multimodal_x1_labels is not None and multimodal_xt_ids is not None:
+                        assert (
+                            multimodal_x1_labels.shape == multimodal_xt_ids.shape == multimodal_actions_mask.shape
+                        ), "DFM multimodal tensors are misaligned."
 
             # Dispatch to language model
             language_model_output = self.language_model(
@@ -1017,27 +1159,51 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             skip_dfm_loss_override = dfm_train_mode == "diffusion_like"
             if not skip_dfm_loss_override:
                 logits = language_model_output.logits
-                vocab_size = logits.shape[-1]
                 # Shift for causal LM loss
                 shift_logits = logits[:, :-1, :]
-                shift_labels = multimodal_labels[:, 1:]
-                shift_loss_mask = multimodal_loss_mask[:, 1:]
-
-                token_losses = torch.nn.functional.cross_entropy(
-                    shift_logits.reshape(-1, vocab_size),
-                    shift_labels.reshape(-1),
-                    reduction="none",
-                    ignore_index=IGNORE_INDEX,
-                ).view(shift_labels.shape)
-
-                if dfm_loss_mode == "masked_ce":
-                    weight = torch.ones_like(shift_loss_mask)
+                if dfm_loss_mode == "generalized_kl":
+                    if multimodal_x1_labels is None or multimodal_xt_ids is None or multimodal_actions_mask is None:
+                        raise ValueError("Missing multimodal bookkeeping for generalized_kl loss.")
+                    x1 = multimodal_x1_labels[:, 1:]
+                    xt = multimodal_xt_ids[:, 1:]
+                    am = multimodal_actions_mask[:, 1:]
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    if action_begin <= self.mask_token_id < action_end:
+                        raise ValueError(
+                            "mask_token_id overlaps action vocab range; generalized_kl requires distinct mask token."
+                        )
+                    lm_loss = self._dfm_generalized_kl_loss(
+                        shift_logits=shift_logits,
+                        x1=x1,
+                        xt=xt,
+                        action_mask=am,
+                        kappa_t=kappa_t,
+                        kdot_t=kdot_t,
+                        action_begin=action_begin,
+                        action_end=action_end,
+                        mask_id=self.mask_token_id,
+                        weight_clip=dfm_weight_clip,
+                    )
                 else:
-                    weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+                    vocab_size = logits.shape[-1]
+                    shift_labels = multimodal_labels[:, 1:]
+                    shift_loss_mask = multimodal_loss_mask[:, 1:]
 
-                masked_loss = token_losses * shift_loss_mask * weight
-                denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
-                lm_loss = masked_loss.sum() / denom
+                    token_losses = torch.nn.functional.cross_entropy(
+                        shift_logits.reshape(-1, vocab_size),
+                        shift_labels.reshape(-1),
+                        reduction="none",
+                        ignore_index=IGNORE_INDEX,
+                    ).view(shift_labels.shape)
+
+                    if dfm_loss_mode == "masked_ce":
+                        weight = torch.ones_like(shift_loss_mask)
+                    else:
+                        weight = dfm_weight.view(-1, 1).expand_as(shift_loss_mask)
+
+                    masked_loss = token_losses * shift_loss_mask * weight
+                    denom = (shift_loss_mask * weight).sum().clamp(min=1.0)
+                    lm_loss = masked_loss.sum() / denom
 
             # DFM stats for logging (both diffusion_like + flow)
             with torch.no_grad():
@@ -1061,6 +1227,53 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                     "frac_w_clipped": (dfm_weight >= dfm_weight_clip).float().mean().detach(),
                     "num_supervised_tokens": dfm_loss_mask.sum().detach(),
                 }
+                if dfm_loss_mode == "generalized_kl" and multimodal_x1_labels is not None:
+                    shift_logits = language_model_output.logits[:, :-1, :]
+                    shift_x1 = multimodal_x1_labels[:, 1:]
+                    shift_xt = multimodal_xt_ids[:, 1:]
+                    shift_am = multimodal_actions_mask[:, 1:].bool()
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    action_ids = torch.arange(action_begin, action_end, device=shift_logits.device)
+                    allowed_ids = torch.cat(
+                        [action_ids, torch.tensor([self.mask_token_id], device=shift_logits.device)], dim=0
+                    )
+                    K = allowed_ids.numel()
+                    logits = shift_logits.index_select(dim=-1, index=allowed_ids)
+                    log_p = torch.log_softmax(logits, dim=-1)
+                    x1_idx = torch.where(
+                        shift_am, shift_x1 - action_begin, torch.zeros_like(shift_x1)
+                    )
+                    xt_idx = torch.where(
+                        shift_am,
+                        torch.where(
+                            shift_xt == self.mask_token_id,
+                            torch.full_like(shift_xt, K - 1),
+                            shift_xt - action_begin,
+                        ),
+                        torch.zeros_like(shift_xt),
+                    )
+                    log_p_x1 = log_p.gather(-1, x1_idx.unsqueeze(-1)).squeeze(-1)
+                    log_p_xt = log_p.gather(-1, xt_idx.unsqueeze(-1)).squeeze(-1)
+                    p_xt = torch.exp(log_p_xt)
+                    masked_xt = shift_xt == self.mask_token_id
+                    denom = shift_am.sum().clamp(min=1.0)
+                    frac_same = ((shift_xt == shift_x1) & shift_am).sum().float() / denom
+                    mean_logp_x1_masked = (
+                        log_p_x1[shift_am & masked_xt].mean() if (shift_am & masked_xt).any() else torch.tensor(0.0)
+                    )
+                    mean_p_xt_masked = (
+                        p_xt[shift_am & masked_xt].mean() if (shift_am & masked_xt).any() else torch.tensor(0.0)
+                    )
+                    jump_coeff = (kdot_t / (1.0 - kappa_t).clamp(min=1e-8)).clamp(max=dfm_weight_clip)
+                    dfm_stats.update(
+                        {
+                            "frac_same": frac_same.detach(),
+                            "jump_coeff_mean": jump_coeff.mean().detach(),
+                            "jump_coeff_p95": torch.quantile(jump_coeff, 0.95).detach(),
+                            "mean_logp_x1_masked": mean_logp_x1_masked.detach(),
+                            "mean_p_xt_masked": mean_p_xt_masked.detach(),
+                        }
+                    )
 
             # Debug loss parity check (optional)
             if os.environ.get("VLA_DFM_DEBUG", "0") == "1":
@@ -1162,7 +1375,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         self.norm_stats = config.norm_stats
 
         # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins)
+        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # check if config has topk_filter_thres
@@ -1200,7 +1413,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        action_begin, _, _ = self._action_vocab_range()
+        ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
@@ -1377,7 +1591,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 .cpu()
                 .numpy()
             )
-            discretized_actions = self.vocab_size - predicted_action_token_ids
+            action_begin, action_end, _ = self._action_vocab_range()
+            discretized_actions = action_end - predicted_action_token_ids
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
@@ -1446,6 +1661,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
                     :self.vocab_size
                 ]
+                action_begin, action_end, _ = self._action_vocab_range()
+                neg_inf = torch.finfo(full_logits.dtype).min
+                if action_begin > 0:
+                    full_logits[..., :action_begin] = neg_inf
+                if action_end < full_logits.shape[-1]:
+                    full_logits[..., action_end:] = neg_inf
 
                 # Extract hidden states for action tokens
                 last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
@@ -1462,16 +1683,14 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             mask_token_id = self.mask_token_id
             # Warn once if mask token collides with action-token range
             if not getattr(self, "_dfm_mask_collision_warned", False):
-                n_bins = self.bin_centers.shape[0] + 1
-                action_low = self.vocab_size - n_bins
-                action_high = self.vocab_size - 1
-                if action_low <= mask_token_id <= action_high:
+                action_begin, action_end, _ = self._action_vocab_range()
+                if action_begin <= mask_token_id < action_end:
                     logger.warning(
                         "mask_token_id (%d) overlaps action-token range [%d, %d]. "
                         "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
                         mask_token_id,
-                        action_low,
-                        action_high,
+                        action_begin,
+                        action_end - 1,
                     )
                 self._dfm_mask_collision_warned = True
             masked_input_ids = torch.where(
@@ -1493,7 +1712,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
 
             predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
-            discretized_actions = self.vocab_size - predicted_action_token_ids
+            action_begin, action_end, _ = self._action_vocab_range()
+            discretized_actions = action_end - predicted_action_token_ids
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
@@ -1512,6 +1732,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_head=None,
         input_ids=None,
         dfm_num_steps: int = 12,
+        dfm_maskgit_num_steps: int = 12,
+        dfm_maskgit_schedule: str = "cosine",
         dfm_schedule: str = "cosine",
         dfm_temperature: float = 1.0,
         dfm_temperature_anneal: str = "none",
@@ -1569,12 +1791,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
                     : self.vocab_size,
                 ]
-                # Restrict sampling to action-token vocabulary (last n_bins tokens)
-                n_bins = self.bin_centers.shape[0] + 1
-                action_low = self.vocab_size - n_bins
-                if action_low > 0:
-                    neg_inf = torch.finfo(full_logits.dtype).min
-                    full_logits[..., :action_low] = neg_inf
+                action_begin, action_end, _ = self._action_vocab_range()
+                neg_inf = torch.finfo(full_logits.dtype).min
+                if action_begin > 0:
+                    full_logits[..., :action_begin] = neg_inf
+                if action_end < full_logits.shape[-1]:
+                    full_logits[..., action_end:] = neg_inf
 
                 last_hidden_states = language_model_output.hidden_states[-1]
                 actions_hidden_states = last_hidden_states[
@@ -1620,6 +1842,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 tokens_to_logits=tokens_to_logits,
                 mask_token_id=mask_token_id,
                 num_steps=dfm_num_steps,
+                maskgit_num_steps=dfm_maskgit_num_steps,
+                maskgit_schedule=dfm_maskgit_schedule,
                 schedule=dfm_schedule,
                 temperature=dfm_temperature,
                 temperature_anneal=dfm_temperature_anneal,
@@ -1638,17 +1862,15 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 decode_mode=dfm_decode_mode,
             )
             # Telemetry: fraction of decoded tokens in action vocab range
-            n_bins = self.bin_centers.shape[0] + 1
-            action_low = self.vocab_size - n_bins
-            action_high = self.vocab_size
-            in_action = (final_ids >= action_low) & (final_ids < action_high)
+            action_begin, action_end, n_bins = self._action_vocab_range()
+            in_action = (final_ids >= action_begin) & (final_ids < action_end)
             dfm_stats["dfm_in_action_frac_final"] = in_action.float().mean().item()
             self.last_dfm_stats = dfm_stats
             if return_debug:
                 self.last_dfm_debug = None
 
             predicted_action_token_ids = final_ids.cpu().numpy()
-            discretized_actions = self.vocab_size - predicted_action_token_ids
+            discretized_actions = action_end - predicted_action_token_ids
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
@@ -1656,12 +1878,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             debug = None
             if return_debug:
                 action_start = 1 + NUM_PROMPT_TOKENS
-                action_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
+                action_span_end = action_start + ACTION_DIM * NUM_ACTIONS_CHUNK
                 prefix = input_ids[:, :action_start]
-                suffix = input_ids[:, action_end:]
+                suffix = input_ids[:, action_span_end:]
                 full_seq = torch.cat([prefix, final_ids, suffix], dim=1)
                 action_span_mask = torch.zeros_like(full_seq, dtype=torch.bool)
-                action_span_mask[:, action_start:action_end] = True
+                action_span_mask[:, action_start:action_span_end] = True
                 changed_off_action = (full_seq != input_ids) & (~action_span_mask)
                 changed_off_action_count = int(changed_off_action.sum().item())
                 stop_token_corrupted = bool((full_seq[:, -1] != input_ids[:, -1]).any().item())
@@ -1692,8 +1914,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     "changed_off_action_count": changed_off_action_count,
                     "stop_token_corrupted": stop_token_corrupted,
                     "action_vocab_range": {
-                        "low": int(action_low),
-                        "high": int(action_high),
+                        "low": int(action_begin),
+                        "high": int(action_end),
                         "n_bins": int(n_bins),
                     },
                 }
@@ -1720,6 +1942,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         use_discrete_diffusion: bool = False,
         use_discrete_flow_matching: bool = False,
         dfm_num_steps: int = 12,
+        dfm_maskgit_num_steps: int = 12,
+        dfm_maskgit_schedule: str = "cosine",
         dfm_schedule: str = "cosine",
         dfm_temperature: float = 1.0,
         dfm_temperature_anneal: str = "none",
@@ -1785,10 +2009,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
 
-        # Extract language embeddings
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )
+        # Extract a safe language summary for FiLM conditioning
+        language_embeddings = None
+        if use_film:
+            language_embeddings = self._compute_language_embeddings(
+                input_embeddings, attention_mask, all_actions_mask
+            )  # (B, 1, llm_dim)
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -1846,6 +2072,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     action_head,
                     input_ids=input_ids,
                     dfm_num_steps=dfm_num_steps,
+                    dfm_maskgit_num_steps=dfm_maskgit_num_steps,
+                    dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=dfm_temperature,
                     dfm_temperature_anneal=dfm_temperature_anneal,
@@ -1936,7 +2164,7 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
         self.norm_stats = config.norm_stats
 
         # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins)
+        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # Compute vocab size for de-tokenization -- revert added "multiple of"
@@ -1968,7 +2196,8 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        action_begin, _, _ = self._action_vocab_range()
+        ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
@@ -2145,7 +2374,8 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
                 .cpu()
                 .numpy()
             )
-            discretized_actions = self.vocab_size - predicted_action_token_ids
+            action_begin, action_end, _ = self._action_vocab_range()
+            discretized_actions = action_end - predicted_action_token_ids
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
@@ -2205,10 +2435,12 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
         input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
 
-        # Extract language embeddings
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )
+        # Extract a safe language summary for FiLM conditioning
+        language_embeddings = None
+        if use_film:
+            language_embeddings = self._compute_language_embeddings(
+                input_embeddings, attention_mask, all_actions_mask
+            )  # (B, 1, llm_dim)
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)

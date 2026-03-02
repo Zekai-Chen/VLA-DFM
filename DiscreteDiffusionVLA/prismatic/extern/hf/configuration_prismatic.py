@@ -84,9 +84,19 @@ class PrismaticConfig(PretrainedConfig):
         llm_max_length: int = 2048,
         pad_token_id: int = 32000,
         mask_token_id: int = 32001,
+        action_vocab_anchor: str = "pad",
         use_mask_token: bool = False,
         use_discrete_diffusion: bool = False,
         use_discrete_flow_matching: bool = False,
+        dfm_schedule: str = "cosine",
+        dfm_time_eps: float = 1e-3,
+        dfm_t_min: float = 0.0,
+        dfm_t_max: float = 1.0,
+        dfm_loss_mode: str = "generalized_kl",
+        dfm_weight_clip: float = 20.0,
+        dfm_train_mode: str = "flow",
+        dfm_maskgit_num_steps: int = 12,
+        dfm_maskgit_schedule: str = "cosine",
         pad_to_multiple_of: int = 64,
         output_projector_states: bool = False,
         **kwargs: str,
@@ -119,9 +129,19 @@ class PrismaticConfig(PretrainedConfig):
         self.llm_max_length = llm_max_length
         self.pad_token_id, self.pad_to_multiple_of = pad_token_id, pad_to_multiple_of
         self.mask_token_id, self.use_mask_token = mask_token_id, use_mask_token
+        self.action_vocab_anchor = action_vocab_anchor
 
         self.use_discrete_diffusion = use_discrete_diffusion
         self.use_discrete_flow_matching = use_discrete_flow_matching
+        self.dfm_schedule = dfm_schedule
+        self.dfm_time_eps = dfm_time_eps
+        self.dfm_t_min = dfm_t_min
+        self.dfm_t_max = dfm_t_max
+        self.dfm_loss_mode = dfm_loss_mode
+        self.dfm_weight_clip = dfm_weight_clip
+        self.dfm_train_mode = dfm_train_mode
+        self.dfm_maskgit_num_steps = dfm_maskgit_num_steps
+        self.dfm_maskgit_schedule = dfm_maskgit_schedule
 
         # [IMPORTANT] HF Utilities actually look for a `text_config` field... we need to use that specific naming!
         self.text_config = (

@@ -52,24 +52,25 @@ class RLDSBatchTransform:
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
 
-        # Get future action chunk
+        # Get action token IDs directly (avoid BPE merging ambiguity)
         future_actions = rlds_batch["action"][1:]
-        future_actions_string = ''.join(self.action_tokenizer(future_actions))
-
-        # Get action chunk string
-        current_action_string = self.action_tokenizer(current_action)
-        action_chunk_string = current_action_string + future_actions_string
-        action_chunk_len = len(action_chunk_string)
+        current_action_ids = self.action_tokenizer.encode_actions_to_token_ids(current_action)
+        future_action_ids = self.action_tokenizer.encode_actions_to_token_ids(future_actions)
+        action_chunk_ids = np.concatenate([current_action_ids, future_action_ids], axis=0).tolist()
+        action_chunk_len = len(action_chunk_ids)
 
         conversation = [
             {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            {"from": "gpt", "value": action_chunk_string},
+            {"from": "gpt", "value": ""},
         ]
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
         # Tokenize (w/ `base_tokenizer`)
         input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
+            input_ids = input_ids[:-1]
+        input_ids = input_ids + action_chunk_ids + [STOP_INDEX]
         labels = list(input_ids)
 
         # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
@@ -250,13 +251,17 @@ class DummyDataset(Dataset):
         prompt_builder = self.prompt_builder_fn("openvla")
         conversation = [
             {"from": "human", "value": f"What action should the robot take to {instruction}?"},
-            {"from": "gpt", "value": self.action_tokenizer(action)},
+            {"from": "gpt", "value": ""},
         ]
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
         # Tokenize (w/ `base_tokenizer`)
         input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
+            input_ids = input_ids[:-1]
+        action_ids = self.action_tokenizer.encode_actions_to_token_ids(action).tolist()
+        input_ids = input_ids + action_ids + [STOP_INDEX]
         labels = list(input_ids)
 
         # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
@@ -265,6 +270,7 @@ class DummyDataset(Dataset):
         pixel_values = self.image_transform(image)
 
         # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        labels[: -(len(action) + 1)] = IGNORE_INDEX
+        action_ids = self.action_tokenizer.encode_actions_to_token_ids(action).tolist()
+        labels[: -(len(action_ids) + 1)] = IGNORE_INDEX
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)

@@ -6,7 +6,7 @@ exports individual functions for clear control flow.
 """
 
 from pathlib import Path
-from typing import Tuple, Type
+from typing import Optional, Tuple, Type
 
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
@@ -31,9 +31,15 @@ def get_vla_dataset_and_collator(
     train: bool = True,
     episodic: bool = False,
     image_aug: bool = False,
+    n_action_bins: Optional[int] = None,
+    action_vocab_anchor: str = "pad",
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
-    action_tokenizer = ActionTokenizer(tokenizer)
+    action_tokenizer = ActionTokenizer(
+        tokenizer,
+        bins=n_action_bins if n_action_bins is not None else 256,
+        action_vocab_anchor=action_vocab_anchor,
+    )
     batch_transform = RLDSBatchTransform(
         action_tokenizer, tokenizer, image_transform, prompt_builder_fn, predict_stop_token=predict_stop_token
     )

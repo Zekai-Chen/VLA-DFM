@@ -127,6 +127,8 @@ class FinetuneConfig:
     dfm_loss_mode: str = "generalized_kl"            # generalized_kl | masked_ce
     dfm_weight_clip: float = 20.0                    # Clamp kappa_dot/(1-kappa)
     dfm_train_mode: str = "flow"                     # flow | diffusion_like
+    dfm_maskgit_num_steps: int = 12                  # MaskGIT iterations (for inference config)
+    dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (for inference config)
 
     # fmt: on
 
@@ -141,6 +143,28 @@ def resolve_torch_dtype(dtype_str: str) -> torch.dtype:
     if normalized in ("fp32", "float32"):
         return torch.float32
     raise ValueError(f"Unsupported torch_dtype: {dtype_str}")
+
+
+def _apply_finetune_cfg_to_model_config(cfg, model_config, processor) -> None:
+    """Apply finetune CLI args to model config so checkpoints are self-describing."""
+    if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
+        if processor.tokenizer.mask_token_id is None:
+            processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+        model_config.set_mask_token_id(processor.tokenizer.mask_token_id)
+        if hasattr(model_config, "use_mask_token"):
+            model_config.use_mask_token = True
+
+    model_config.use_discrete_diffusion = cfg.use_discrete_diffusion
+    model_config.use_discrete_flow_matching = cfg.use_discrete_flow_matching
+    model_config.dfm_schedule = cfg.dfm_schedule
+    model_config.dfm_time_eps = cfg.dfm_time_eps
+    model_config.dfm_t_min = cfg.dfm_t_min
+    model_config.dfm_t_max = cfg.dfm_t_max
+    model_config.dfm_loss_mode = cfg.dfm_loss_mode
+    model_config.dfm_weight_clip = cfg.dfm_weight_clip
+    model_config.dfm_train_mode = cfg.dfm_train_mode
+    model_config.dfm_maskgit_num_steps = cfg.dfm_maskgit_num_steps
+    model_config.dfm_maskgit_schedule = cfg.dfm_maskgit_schedule
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -386,8 +410,12 @@ def run_forward_pass(
     if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
-    current_action_mask = get_current_action_mask(ground_truth_token_ids)
-    next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+    current_action_mask = get_current_action_mask(
+        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+    )
+    next_actions_mask = get_next_actions_mask(
+        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+    )
 
     # Compute metrics for discrete action representation (next-token prediction)
     if not (use_l1_regression or use_diffusion):
@@ -453,8 +481,12 @@ def run_forward_pass(
         if use_discrete_diffusion:
             # reset action mask to get correct hidden states for action portion
             ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-            current_action_mask = get_current_action_mask(ground_truth_token_ids)
-            next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+            current_action_mask = get_current_action_mask(
+                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+            )
+            next_actions_mask = get_next_actions_mask(
+                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+            )
 
         actions_hidden_states = (
             text_hidden_states[current_action_mask | next_actions_mask]
@@ -708,6 +740,7 @@ def save_training_checkpoint(
     if distributed_state.is_main_process:
         # Save processor and LoRA adapter
         processor.save_pretrained(checkpoint_dir)
+        vla.module.config.save_pretrained(checkpoint_dir)
         vla.module.save_pretrained(adapter_dir)
 
         # Save other components
@@ -735,13 +768,19 @@ def save_training_checkpoint(
     # Note: Can be very slow on some devices; if so, we recommend merging offline
     if cfg.use_lora and cfg.merge_lora_during_training:
         base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=resolve_torch_dtype(cfg.torch_dtype), low_cpu_mem_usage=True, trust_remote_code=True
+            cfg.vla_path,
+            config=vla.module.config,
+            torch_dtype=resolve_torch_dtype(cfg.torch_dtype),
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
         )
         merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
         merged_vla = merged_vla.merge_and_unload()
 
         if distributed_state.is_main_process:
+            merged_vla.config = vla.module.config
             merged_vla.save_pretrained(checkpoint_dir)
+            vla.module.config.save_pretrained(checkpoint_dir)
             print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
 
         # Wait for merged model to be saved
@@ -949,15 +988,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
-    if cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching:
-        processor.tokenizer.add_special_tokens({'mask_token': '<mask>'})
-        # Set the mask token ID on the configuration instance
-        model_config.set_mask_token_id(processor.tokenizer.mask_token_id)
-        # model_config.set_vocab_size(len(processor.tokenizer))  # 自行向上取整到64的整数倍, 原本还有空间不需要调整
-    if cfg.use_discrete_diffusion:
-        model_config.set_dicrete_diffusion()
-    if cfg.use_discrete_flow_matching:
-        model_config.set_discrete_flow_matching()
+    _apply_finetune_cfg_to_model_config(cfg, model_config, processor)
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
@@ -972,12 +1003,17 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # LoRA setup
     if cfg.use_lora:
+        lora_kwargs = {}
+        if cfg.use_discrete_flow_matching:
+            # Ensure mask/pad embeddings are trainable and saved in the adapter for DFM
+            lora_kwargs["modules_to_save"] = ["embed_tokens", "lm_head"]
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
             target_modules="all-linear",
             init_lora_weights="gaussian",
+            **lora_kwargs,
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
@@ -1080,7 +1116,14 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
 
     # Create Action Tokenizer
-    action_tokenizer = ActionTokenizer(processor.tokenizer)
+    model_cfg = getattr(vla, "module", vla)
+    n_action_bins = getattr(getattr(model_cfg, "config", None), "n_action_bins", None)
+    action_vocab_anchor = getattr(getattr(model_cfg, "config", None), "action_vocab_anchor", "pad")
+    action_tokenizer = ActionTokenizer(
+        processor.tokenizer,
+        bins=n_action_bins if n_action_bins is not None else 256,
+        action_vocab_anchor=action_vocab_anchor,
+    )
 
     # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
     #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.

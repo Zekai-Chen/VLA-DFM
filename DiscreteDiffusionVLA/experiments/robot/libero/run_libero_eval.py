@@ -17,6 +17,8 @@ from typing import Optional, Union
 
 import draccus
 import numpy as np
+import torch
+import torch.nn.functional as F
 import tqdm
 import wandb
 from libero.libero import benchmark
@@ -36,6 +38,7 @@ from experiments.robot.openvla_utils import (
     get_noisy_action_projector,
     get_processor,
     get_proprio_projector,
+    validate_model_tokenizer_alignment,
     resize_image_for_policy,
 )
 from experiments.robot.robot_utils import (
@@ -47,7 +50,12 @@ from experiments.robot.robot_utils import (
     normalize_gripper_action,
     set_seed_everywhere,
 )
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK
+from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+from prismatic.training.train_utils import compute_token_accuracy, get_current_action_mask
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.constants import NUM_ACTIONS_CHUNK, STOP_INDEX
+from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 
 
 # Define task suite constants
@@ -97,6 +105,8 @@ class GenerateConfig:
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
     dfm_num_steps: int = 64                          # Number of CTMC steps
+    dfm_maskgit_num_steps: int = 12                  # Number of MaskGIT iterations (when decode_mode=maskgit)
+    dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (when decode_mode=maskgit)
     dfm_schedule: str = "linear"                     # Schedule for kappa(t)
     dfm_temperature: float = 1.0                     # Sampling temperature
     dfm_temperature_anneal: str = "none"             # none | linear
@@ -143,6 +153,14 @@ class GenerateConfig:
     num_trials_per_task: int = 50                    # Number of rollouts per task  50
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
     env_img_res: int = 256                           # Resolution for environment images (not policy input resolution)
+
+    # Eval probe (offline sanity inside eval)
+    eval_probe_mode: str = "none"                    # none | teacher_forced | gt_actions
+    eval_probe_data_root: str = ""                   # Required for teacher_forced/gt_actions
+    eval_probe_dataset_name: str = ""                # Required for teacher_forced/gt_actions
+    eval_probe_num_batches: int = 1                  # # batches for teacher-forced metrics
+    eval_probe_task_id: int = 0                      # Task ID for gt_actions probe
+    eval_probe_episode_idx: int = 0                  # Episode idx for gt_actions probe
 
     #################################################################################################################
     # Utils
@@ -206,6 +224,7 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
+        validate_model_tokenizer_alignment(model, processor.tokenizer)
         check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
@@ -257,6 +276,160 @@ def log_message(message: str, log_file=None):
     if log_file:
         log_file.write(message + "\n")
         log_file.flush()
+
+
+def _compute_num_patches(model, use_proprio: bool) -> int:
+    num_patches = model.vision_backbone.get_num_patches() * model.vision_backbone.get_num_images_in_input()
+    if use_proprio:
+        num_patches += 1
+    return num_patches
+
+
+def _teacher_forced_metrics(
+    model,
+    batch,
+    action_tokenizer: ActionTokenizer,
+    use_proprio: bool,
+    proprio_projector=None,
+):
+    device = next(model.parameters()).device
+    pixel_dtype = torch.bfloat16
+    if hasattr(model, "vision_backbone") and hasattr(model.vision_backbone, "half_precision_dtype"):
+        pixel_dtype = model.vision_backbone.half_precision_dtype
+
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
+    pixel_values = batch["pixel_values"].to(device, dtype=pixel_dtype)
+    proprio = batch.get("proprio")
+    if proprio is not None:
+        proprio = proprio.numpy()
+
+    with torch.no_grad():
+        output = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            labels=labels,
+            output_hidden_states=False,
+            proprio=proprio if use_proprio else None,
+            proprio_projector=proprio_projector if use_proprio else None,
+            use_film=False,
+            dfm_schedule=getattr(model.config, "dfm_schedule", "cosine"),
+        )
+
+    num_patches = _compute_num_patches(model, use_proprio)
+    logits = output.logits[:, num_patches:-1, :]
+    gt_tokens = labels[:, 1:]
+    min_len = min(logits.shape[1], gt_tokens.shape[1])
+    logits = logits[:, :min_len]
+    gt_tokens = gt_tokens[:, :min_len]
+    pred_tokens = logits.argmax(dim=-1)
+
+    action_begin = action_tokenizer.action_token_begin_idx
+    action_end = action_tokenizer.action_token_end_idx
+    action_mask = (gt_tokens >= action_begin) & (gt_tokens < action_end)
+
+    metrics = {}
+    if action_mask.sum().item() > 0:
+        action_logits = logits[action_mask]
+        action_targets = gt_tokens[action_mask]
+        action_ce = F.cross_entropy(action_logits, action_targets, reduction="mean")
+        action_acc = compute_token_accuracy(pred_tokens, gt_tokens, action_mask)
+        metrics["teacher_forced_action_ce"] = float(action_ce.item())
+        metrics["teacher_forced_action_acc"] = float(action_acc.item())
+    else:
+        metrics["teacher_forced_action_ce"] = float("nan")
+        metrics["teacher_forced_action_acc"] = float("nan")
+
+    stop_mask = gt_tokens == STOP_INDEX
+    if stop_mask.sum().item() > 0:
+        stop_acc = (pred_tokens[stop_mask] == gt_tokens[stop_mask]).float().mean()
+        metrics["teacher_forced_stop_acc"] = float(stop_acc.item())
+    else:
+        metrics["teacher_forced_stop_acc"] = float("nan")
+
+    return metrics
+
+
+def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, task_suite, log_file=None):
+    """Optional eval-time probe to compute teacher-forced metrics or execute GT actions."""
+    if cfg.eval_probe_mode == "none":
+        return
+
+    if not cfg.eval_probe_data_root or not cfg.eval_probe_dataset_name:
+        log_message(
+            "Eval probe requested but eval_probe_data_root/dataset_name not set; skipping probe.",
+            log_file,
+        )
+        return
+
+    # Build action tokenizer and dataset
+    n_action_bins = getattr(model.config, "n_action_bins", 256)
+    anchor = getattr(model.config, "action_vocab_anchor", "pad")
+    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
+    use_wrist_image = cfg.num_images_in_input > 1
+    batch_transform = RLDSBatchTransform(
+        action_tokenizer,
+        processor.tokenizer,
+        image_transform=processor.image_processor.apply_transform,
+        prompt_builder_fn=PurePromptBuilder,
+        use_wrist_image=use_wrist_image,
+        use_proprio=cfg.use_proprio,
+    )
+    dataset = RLDSDataset(
+        data_root_dir=cfg.eval_probe_data_root,
+        data_mix=cfg.eval_probe_dataset_name,
+        batch_transform=batch_transform,
+        resize_resolution=tuple(model.config.image_sizes),
+        shuffle_buffer_size=10_000,
+        image_aug=False,
+    )
+    collator = PaddedCollatorForActionPrediction(
+        processor.tokenizer.model_max_length,
+        processor.tokenizer.pad_token_id,
+        padding_side="right",
+    )
+
+    sample = next(iter(dataset))
+    batch = collator([sample])
+    tf_metrics = _teacher_forced_metrics(
+        model=model,
+        batch=batch,
+        action_tokenizer=action_tokenizer,
+        use_proprio=cfg.use_proprio,
+        proprio_projector=proprio_projector,
+    )
+    log_message(
+        f"[eval_probe:{cfg.eval_probe_mode}] teacher_forced_action_ce={tf_metrics['teacher_forced_action_ce']:.6f} "
+        f"teacher_forced_action_acc={tf_metrics['teacher_forced_action_acc']:.6f} "
+        f"teacher_forced_stop_acc={tf_metrics['teacher_forced_stop_acc']:.6f}",
+        log_file,
+    )
+
+    if cfg.eval_probe_mode == "gt_actions":
+        # Execute GT actions from the dataset sample on task 0, episode 0
+        task_id = cfg.eval_probe_task_id
+        task = task_suite.get_task(task_id)
+        env, task_description = get_libero_env(task, cfg.model_family, resolution=cfg.env_img_res)
+        initial_states, _ = load_initial_states(cfg, task_suite, task_id, log_file)
+        init_state = initial_states[cfg.eval_probe_episode_idx]
+        env.reset()
+        env.set_init_state(init_state)
+
+        actions_norm = batch["actions"].numpy()
+        actions_unnorm = model._unnormalize_actions(actions_norm, cfg.unnorm_key)
+        success = False
+        for action in actions_unnorm:
+            action_proc = process_action(action, cfg.model_family)
+            obs, reward, done, info = env.step(action_proc.tolist())
+            if done:
+                success = True
+                break
+        log_message(
+            f"[eval_probe:gt_actions] task={task_description} success={success}",
+            log_file,
+        )
 
 
 class JsonlWriter:
@@ -405,6 +578,75 @@ def run_episode(
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
                     if debug_writer is not None:
+                        # Minimal diagnostics: first two episodes only
+                        if episode_idx < 2:
+                            actions_np = np.asarray(actions)
+                            if actions_np.size > 0:
+                                raw_gripper = float(actions_np.reshape(-1, actions_np.shape[-1])[:, -1][0])
+                            else:
+                                raw_gripper = None
+                            raw_min = float(np.min(actions_np)) if actions_np.size else None
+                            raw_max = float(np.max(actions_np)) if actions_np.size else None
+                            raw_mean = float(np.mean(actions_np)) if actions_np.size else None
+                            raw_std = float(np.std(actions_np)) if actions_np.size else None
+                            raw_clip = (
+                                float(np.mean(np.abs(actions_np) >= 1.0)) if actions_np.size else None
+                            )
+                            post_actions = np.stack(
+                                [process_action(a.copy(), cfg.model_family) for a in actions_np],
+                                axis=0,
+                            ) if actions_np.size else actions_np
+                            if post_actions.size > 0:
+                                post_gripper = float(post_actions.reshape(-1, post_actions.shape[-1])[:, -1][0])
+                            else:
+                                post_gripper = None
+                            post_min = float(np.min(post_actions)) if post_actions.size else None
+                            post_max = float(np.max(post_actions)) if post_actions.size else None
+                            post_mean = float(np.mean(post_actions)) if post_actions.size else None
+                            post_std = float(np.std(post_actions)) if post_actions.size else None
+                            post_clip = (
+                                float(np.mean(np.abs(post_actions) >= 1.0)) if post_actions.size else None
+                            )
+                            debug = dict(debug) if debug is not None else {}
+                            debug["unnorm_key"] = getattr(cfg, "unnorm_key", None)
+                            debug["action_unnorm_stats"] = {
+                                "min": raw_min,
+                                "max": raw_max,
+                                "mean": raw_mean,
+                                "std": raw_std,
+                                "clip_frac": raw_clip,
+                            }
+                            debug["action_postprocess_stats"] = {
+                                "min": post_min,
+                                "max": post_max,
+                                "mean": post_mean,
+                                "std": post_std,
+                                "clip_frac": post_clip,
+                            }
+                            debug["gripper_raw"] = raw_gripper
+                            debug["gripper_post"] = post_gripper
+                            dfm_stats = debug.get("dfm_stats", {})
+                            debug["dfm_stats_summary"] = {
+                                "dfm_decode_mode": dfm_stats.get("dfm_decode_mode"),
+                                "dfm_n_action_positions": dfm_stats.get("dfm_n_action_positions"),
+                                "dfm_n_masked_initial": dfm_stats.get("dfm_n_masked_initial"),
+                                "dfm_mask_frac_final": dfm_stats.get("dfm_mask_frac_final"),
+                                "dfm_unresolved_final": dfm_stats.get("dfm_unresolved_final"),
+                            }
+                            debug["dfm_steps"] = {
+                                "dfm_unresolved_count": dfm_stats.get("dfm_unresolved_count"),
+                                "dfm_num_changed_tokens": dfm_stats.get("dfm_num_changed_tokens"),
+                            }
+                        # Integrity check for maskgit decoding
+                        if cfg.dfm_decode_mode == "maskgit":
+                            dfm_stats = debug.get("dfm_stats", {}) if debug is not None else {}
+                            n_action = dfm_stats.get("dfm_n_action_positions")
+                            n_masked = dfm_stats.get("dfm_n_masked_initial")
+                            if (n_action is not None) and (n_masked is not None) and (n_action != n_masked):
+                                raise RuntimeError(
+                                    f"MaskGIT init mismatch: n_masked_initial={n_masked}, "
+                                    f"n_action_positions={n_action}. Action span/masking is incorrect."
+                                )
                         debug_writer.write(
                             {
                                 "t_wall": time.time(),
@@ -630,6 +872,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
     num_tasks = task_suite.n_tasks
 
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
+    log_message(f"Eval probe mode: {cfg.eval_probe_mode}", log_file)
+
+    # Optional eval-time probe (teacher-forced metrics or GT actions)
+    run_eval_probe(cfg, model, processor, proprio_projector, task_suite, log_file)
 
     # Start evaluation
     total_episodes, total_successes = 0, 0

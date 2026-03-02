@@ -2,41 +2,21 @@
 
 import torch
 
-from prismatic.vla.constants import ACTION_DIM, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX
+from prismatic.vla.constants import ACTION_DIM
 
 
-def get_current_action_mask(token_ids):
-    # Create a tensor marking positions of IGNORE_INDEX
-    newline_positions = token_ids != IGNORE_INDEX
-
-    # Calculate cumulative sum to identify regions between newlines
-    cumsum = torch.cumsum(newline_positions, dim=1)
-
-    # Create the mask
-    mask = (1 <= cumsum) & (cumsum <= ACTION_DIM)
-
-    # Extract the action part only
-    action_tokens_only_mask = token_ids > ACTION_TOKEN_BEGIN_IDX
-    mask = action_tokens_only_mask * mask
-
-    return mask
+def get_current_action_mask(token_ids, action_begin: int, action_end: int):
+    is_action = (token_ids >= action_begin) & (token_ids < action_end)
+    action_cumsum = torch.cumsum(is_action, dim=1)
+    mask = (1 <= action_cumsum) & (action_cumsum <= ACTION_DIM)
+    return is_action & mask
 
 
-def get_next_actions_mask(token_ids):
-    # Create a tensor marking positions of IGNORE_INDEX
-    newline_positions = token_ids != IGNORE_INDEX
-
-    # Calculate cumulative sum to identify regions between newlines
-    cumsum = torch.cumsum(newline_positions, dim=1)
-
-    # Create the mask
-    mask = cumsum > ACTION_DIM
-
-    # Extract the action part only
-    action_tokens_only_mask = token_ids > ACTION_TOKEN_BEGIN_IDX
-    mask = action_tokens_only_mask * mask
-
-    return mask
+def get_next_actions_mask(token_ids, action_begin: int, action_end: int):
+    is_action = (token_ids >= action_begin) & (token_ids < action_end)
+    action_cumsum = torch.cumsum(is_action, dim=1)
+    mask = action_cumsum > ACTION_DIM
+    return is_action & mask
 
 
 def compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask):

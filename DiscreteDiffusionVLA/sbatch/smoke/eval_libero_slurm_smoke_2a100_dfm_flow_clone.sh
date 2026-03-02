@@ -5,9 +5,9 @@
 #SBATCH --nodes=1
 #SBATCH --mem=120G
 #SBATCH --time=47:00:00
-#SBATCH --job-name=openvla-eval-smoke-dd
-#SBATCH --output=logs/openvla_eval_smoke_dd_%j.out
-#SBATCH --error=logs/openvla_eval_smoke_dd_%j.err
+#SBATCH --job-name=openvla-eval-smoke-dfm-clone
+#SBATCH --output=logs/openvla_eval_smoke_dfm_clone_%j.out
+#SBATCH --error=logs/openvla_eval_smoke_dfm_clone_%j.err
 
 set -euo pipefail
 
@@ -68,13 +68,20 @@ python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.
 
 # --- Base path + logging ---
 BASE_DIR="/scratch/ywn1043/VLA-DFM"
-LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
+LOG_DIR="${BASE_DIR}/logs/eval_smoke_dfm_clone/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-20k--20260302_1306"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k--20260301_2133"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
+DFM_SCHEDULE=${DFM_SCHEDULE:-}
+DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
+DFM_EARLY_EXIT_FRAC=${DFM_EARLY_EXIT_FRAC:-0.0}
+DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
+DFM_DEBUG=${DFM_DEBUG:-False}
+NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -86,8 +93,23 @@ for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 
 # Evaluate a small set of checkpoints
 STEPS=(
-  20000
+  3000
 )
+
+# Default to checkpoint schedule if not set
+if [[ -z "${DFM_SCHEDULE}" ]]; then
+  DFM_SCHEDULE=$(python - <<'PY'
+import json, os
+ckpt = os.environ.get("CHECKPOINT_ROOT")
+cfg_path = os.path.join(ckpt, "config.json") if ckpt else None
+if not cfg_path or not os.path.exists(cfg_path):
+    print("cosine")
+    raise SystemExit(0)
+cfg = json.load(open(cfg_path))
+print(cfg.get("dfm_schedule", "cosine"))
+PY
+)
+fi
 
 declare -a JOB_PIDS
 for ((i=0; i<TOTAL_SLOTS; i++)); do
@@ -115,12 +137,19 @@ start_job() {
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \
       --use_diffusion False \
-      --use_discrete_diffusion True \
-      --use_discrete_flow_matching False \
+      --use_discrete_diffusion False \
+      --use_discrete_flow_matching True \
       --use_film False \
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
+      --dfm_num_steps ${DFM_NUM_STEPS} \
+      --dfm_schedule ${DFM_SCHEDULE} \
+      --dfm_decode_mode ${DFM_DECODE_MODE} \
+      --dfm_early_exit ${DFM_EARLY_EXIT} \
+      --dfm_early_exit_frac ${DFM_EARLY_EXIT_FRAC} \
+      --dfm_debug ${DFM_DEBUG} \
+      --num_open_loop_steps ${NUM_OPEN_LOOP_STEPS} \
       --local_log_dir "${LOG_DIR}" \
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
