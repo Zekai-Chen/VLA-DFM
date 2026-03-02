@@ -260,6 +260,8 @@ def _evaluate_checkpoint(
     use_discrete_diffusion: bool,
     dfm_decode_mode: str,
     dfm_num_steps: int,
+    dfm_maskgit_num_steps: int,
+    dfm_maskgit_schedule: str,
     dfm_early_exit: bool,
     center_crop: bool,
     use_proprio: bool,
@@ -276,6 +278,8 @@ def _evaluate_checkpoint(
         load_in_4bit=False,
         center_crop=center_crop,
         dfm_num_steps=int(dfm_num_steps),
+        dfm_maskgit_num_steps=int(dfm_maskgit_num_steps),
+        dfm_maskgit_schedule=dfm_maskgit_schedule,
         dfm_early_exit=dfm_early_exit,
     )
 
@@ -397,6 +401,8 @@ def _evaluate_checkpoint(
                 use_discrete_diffusion=use_discrete_diffusion,
                 use_discrete_flow_matching=use_discrete_flow_matching,
                 dfm_num_steps=int(dfm_num_steps),
+                dfm_maskgit_num_steps=int(dfm_maskgit_num_steps),
+                dfm_maskgit_schedule=dfm_maskgit_schedule,
                 dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
                 dfm_early_exit=dfm_early_exit,
                 dfm_decode_mode=dfm_decode_mode,
@@ -503,6 +509,8 @@ def main() -> None:
     parser.add_argument("--num_batches", type=int, default=5)
     parser.add_argument("--dfm_decode_mode", type=str, default="maskgit")
     parser.add_argument("--dfm_num_steps", type=int, default=128)
+    parser.add_argument("--dfm_maskgit_num_steps", type=int, default=12)
+    parser.add_argument("--dfm_maskgit_schedule", type=str, default="cosine")
     parser.add_argument("--dfm_early_exit", type=str, default="False")
     parser.add_argument("--compare_dd", type=str, default="False")
     parser.add_argument("--dd_checkpoint", type=str, default="")
@@ -530,6 +538,8 @@ def main() -> None:
         use_discrete_diffusion=(primary_mode == "dd"),
         dfm_decode_mode=args.dfm_decode_mode,
         dfm_num_steps=int(args.dfm_num_steps),
+        dfm_maskgit_num_steps=int(args.dfm_maskgit_num_steps),
+        dfm_maskgit_schedule=str(args.dfm_maskgit_schedule),
         dfm_early_exit=_as_bool(args.dfm_early_exit),
         center_crop=_as_bool(args.center_crop),
         use_proprio=_as_bool(args.use_proprio),
@@ -554,6 +564,8 @@ def main() -> None:
             use_discrete_diffusion=True,
             dfm_decode_mode="ctmc",
             dfm_num_steps=int(args.dd_num_steps),
+            dfm_maskgit_num_steps=int(args.dfm_maskgit_num_steps),
+            dfm_maskgit_schedule=str(args.dfm_maskgit_schedule),
             dfm_early_exit=False,
             center_crop=_as_bool(args.center_crop),
             use_proprio=_as_bool(args.use_proprio),

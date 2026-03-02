@@ -872,6 +872,9 @@ def get_vla_action(
         dfm_maskgit_num_steps = getattr(cfg, "dfm_maskgit_num_steps", None)
         if dfm_maskgit_num_steps in (None, 0):
             dfm_maskgit_num_steps = getattr(getattr(vla, "config", None), "dfm_maskgit_num_steps", 12)
+        dfm_maskgit_schedule = getattr(cfg, "dfm_maskgit_schedule", None)
+        if dfm_maskgit_schedule in (None, "", "auto"):
+            dfm_maskgit_schedule = getattr(getattr(vla, "config", None), "dfm_maskgit_schedule", "cosine")
 
         # Generate action
         if action_head is None:
@@ -890,6 +893,7 @@ def get_vla_action(
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
+                    dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
@@ -922,6 +926,19 @@ def get_vla_action(
                                 f"MaskGIT init mismatch: n_masked_initial={n_masked}, "
                                 f"n_action_positions={n_action}. Action span/masking is incorrect."
                             )
+                        nfe = dfm_stats.get("dfm_nfe_realized")
+                        step_masked = dfm_stats.get("dfm_step_masked_count", [])
+                        expected = dfm_maskgit_num_steps
+                        if nfe is not None and nfe != expected:
+                            raise RuntimeError(
+                                f"MaskGIT nfe mismatch: realized={nfe}, expected={expected}. "
+                                "MaskGIT loop length is incorrect."
+                            )
+                        if step_masked and len(step_masked) != expected:
+                            raise RuntimeError(
+                                f"MaskGIT step count mismatch: len(step_masked_count)={len(step_masked)}, "
+                                f"expected={expected}. MaskGIT loop length is incorrect."
+                            )
             else:
                 action, _ = vla.predict_action(
                     **inputs,
@@ -936,6 +953,7 @@ def get_vla_action(
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
+                    dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
@@ -968,6 +986,7 @@ def get_vla_action(
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
+                    dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
@@ -1000,6 +1019,7 @@ def get_vla_action(
                     use_discrete_flow_matching=use_discrete_flow_matching,
                     dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
+                    dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
