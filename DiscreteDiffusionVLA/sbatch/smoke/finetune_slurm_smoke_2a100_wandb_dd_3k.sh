@@ -75,9 +75,9 @@ DATASET_NAME="libero_object_no_noops"
 RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke"
 
 # --- Training params (short) ---
-BATCH_SIZE=2
+BATCH_SIZE=4
 LEARNING_RATE=5e-4
-NUM_STEPS_BEFORE_DECAY=10000
+NUM_STEPS_BEFORE_DECAY=1000
 MAX_STEPS=3000
 SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
