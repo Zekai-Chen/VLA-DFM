@@ -40,6 +40,7 @@ This report summarizes all **DFM/DD ablations, code changes, and results** discu
 | **DFM‑maskedce + tmax=0.7 (maskpad)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-maskedce/...--20260301_1621` | same as above | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | ctmc | 0.000 | 0.428 | 0.362 | 2.367 | 0.292 | 4.366 | 0.167 | 0% (implied) |
 | **DFM‑moremask tmax=0.9 (maskpad)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask/...--20260301_1904` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskfix_moremask.sh` | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | ctmc | 0.114 | 0.452 | 0.275 | 1.110 | 0.724 | 3.984 | 0.288 | 0% (implied) |
 | **DFM‑moremask tmax=0.9 (maskpad, newer)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask/...--20260301_2133` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskfix_moremask.sh` | `dfm_sanity_check_slurm_smoke_2a100_maskpad.sh` | ctmc | 0.032 | 0.533 | 0.439 | 0.360 | 0.910 | 3.180 | 0.458 | 0% (implied) |
+| **DFM‑moremask tmax=0.9 (no‑maskpad, newer)** | `/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-maskfix-moremask/...--20260301_2133` | `finetune_slurm_smoke_2a100_wandb_dfm_flow_3k_maskfix_moremask.sh` | `dfm_sanity_check_slurm_smoke_2a100.sh` | ctmc | 0.004 | 0.511 | 0.392 | 1.003 | 0.773 | 3.869 | 0.254 | 0% (implied) |
 
 Notes:
 - The eval scripts used for DFM were `eval_libero_slurm_smoke_2a100_dfm_flow_3k.sh` and `eval_libero_slurm_smoke_2a100_dfm_flow_clone.sh`. Both produced **0% success** in multiple episodes.
@@ -74,6 +75,10 @@ Notes:
 ### 3.6 DFM moremask (tmax=0.9) (20260301_2133, maskpad)
 - **Outcome:** TF acc ~0.910, masked acc ~0.458 (notably higher than earlier runs).
 - **Interpretation:** Mask‑denoise accuracy improved into the ~0.46 range, which is the best observed so far in this thread, but it still remains below the likely threshold for stable DFM inference. This run still used **CTMC decoding** in sanity checks, so it does **not** validate the fixed MaskGIT path yet.
+
+### 3.7 DFM moremask (tmax=0.9) (20260301_2133, no‑maskpad)
+- **Outcome:** TF acc ~0.773, masked acc ~0.254 (worse than maskpad).
+- **Interpretation:** Removing the mask‑pad override reduced masked‑denoise accuracy significantly. This suggests the override helps this checkpoint, but the overall denoising ability still remains too low for successful DFM inference. CTMC decode was used in this sanity run.
 
 ---
 
@@ -177,7 +182,7 @@ Changes:
 
 **DFM (multiple runs)**
 - Eval success ≈ 0% across multiple checkpoints.
-- Teacher‑forced acc often **high**, while masked‑denoise acc is **generally low** but has improved in the latest moremask run (**~0.46**).
+- Teacher‑forced acc often **high**, while masked‑denoise acc is **generally low** but has improved in the latest moremask run (**~0.46 with maskpad**, **~0.25 without**).
 - Indicates **mask conditioning weakness** remains the dominant issue.
 
 ---

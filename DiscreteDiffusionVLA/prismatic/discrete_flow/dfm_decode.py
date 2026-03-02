@@ -183,7 +183,8 @@ def dfm_decode(
             unresolved_count = unresolved.sum(dim=1)
             total_unknown = unknown_init.to(unresolved_count.device)
             mask_len = torch.round(total_unknown.float() * mask_ratio).long()
-            mask_len = torch.clamp(mask_len, min=0, max=total_unknown)
+            mask_len = torch.maximum(mask_len, torch.zeros_like(mask_len))
+            mask_len = torch.minimum(mask_len, total_unknown)
             if debug_level >= 1:
                 mask_len_per_step.append(mask_len.detach().cpu().tolist())
 
