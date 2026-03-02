@@ -265,6 +265,7 @@ def _evaluate_checkpoint(
     use_proprio: bool,
     check_image_parity: bool,
     mask_embed_override: str = "none",
+    compute_masked_denoise: bool = True,
 ) -> Dict[str, float]:
     cfg = SimpleNamespace(
         model_family="openvla",
@@ -374,15 +375,15 @@ def _evaluate_checkpoint(
         input_ids_prompt = input_ids[:, :prompt_len]
         attention_mask_prompt = attention_mask[:, :prompt_len]
 
-    proprio = batch.get("proprio")
-    if proprio is not None:
-        proprio = proprio.to(device)
-        if proprio_projector is not None:
-            try:
-                proj_dtype = next(proprio_projector.parameters()).dtype
-                proprio = proprio.to(dtype=proj_dtype)
-            except StopIteration:
-                pass
+        proprio = batch.get("proprio")
+        if proprio is not None:
+            proprio = proprio.to(device)
+            if proprio_projector is not None:
+                try:
+                    proj_dtype = next(proprio_projector.parameters()).dtype
+                    proprio = proprio.to(dtype=proj_dtype)
+                except StopIteration:
+                    pass
 
         with torch.no_grad():
             pred_actions_unnorm, _, debug = vla.predict_action(
@@ -432,7 +433,7 @@ def _evaluate_checkpoint(
             use_proprio=use_proprio,
             dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
             mask_token_id=mask_token_id,
-            compute_masked_denoise=True,
+            compute_masked_denoise=compute_masked_denoise,
         )
         if not math.isnan(tf_metrics["teacher_forced_action_ce"]):
             tf_ce_sum += tf_metrics["teacher_forced_action_ce"]
@@ -507,20 +508,26 @@ def main() -> None:
     parser.add_argument("--dd_checkpoint", type=str, default="")
     parser.add_argument("--dd_num_steps", type=int, default=64)
     parser.add_argument("--mask_embed_override", type=str, default="none")
+    parser.add_argument("--primary_mode", type=str, default="dfm", choices=["dfm", "dd"])
     parser.add_argument("--center_crop", type=str, default="True")
     parser.add_argument("--use_proprio", type=str, default="True")
     parser.add_argument("--check_image_parity", type=str, default="False")
     args = parser.parse_args()
 
     check_image_parity = _as_bool(args.check_image_parity)
+    primary_mode = args.primary_mode.lower()
+    if primary_mode not in ("dfm", "dd"):
+        raise ValueError(f"Unknown primary_mode: {primary_mode}")
+
+    primary_label = "DFM" if primary_mode == "dfm" else "DD"
     dfm_summary = _evaluate_checkpoint(
-        label="DFM",
+        label=primary_label,
         checkpoint=args.checkpoint,
         data_root=args.data_root,
         dataset_name=args.dataset_name,
         num_batches=args.num_batches,
-        use_discrete_flow_matching=True,
-        use_discrete_diffusion=False,
+        use_discrete_flow_matching=(primary_mode == "dfm"),
+        use_discrete_diffusion=(primary_mode == "dd"),
         dfm_decode_mode=args.dfm_decode_mode,
         dfm_num_steps=int(args.dfm_num_steps),
         dfm_early_exit=_as_bool(args.dfm_early_exit),
@@ -528,9 +535,12 @@ def main() -> None:
         use_proprio=_as_bool(args.use_proprio),
         check_image_parity=check_image_parity,
         mask_embed_override=args.mask_embed_override,
+        compute_masked_denoise=(primary_mode == "dfm"),
     )
 
     compare_dd = _as_bool(args.compare_dd) or bool(args.dd_checkpoint)
+    if compare_dd and primary_mode == "dd":
+        raise ValueError("--compare_dd is only supported when --primary_mode dfm")
     if compare_dd:
         if not args.dd_checkpoint:
             raise ValueError("--dd_checkpoint is required when --compare_dd True")
