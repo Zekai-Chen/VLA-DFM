@@ -17,6 +17,7 @@ def dfm_decode(
     tokens_to_logits: Callable[[torch.LongTensor], Tuple[torch.Tensor, torch.Tensor]],
     mask_token_id: int,
     num_steps: int = 12,
+    maskgit_num_steps: int = 12,
     schedule: str = "cosine",
     temperature: float = 1.0,
     temperature_anneal: str = "none",
@@ -64,11 +65,18 @@ def dfm_decode(
     if decode_mode not in ("ctmc", "maskgit"):
         raise ValueError(f"Unknown decode_mode: {decode_mode}")
 
-    t_grid, dt_grid = time_grid(num_steps, eps=time_eps, device=device)
+    if decode_mode == "maskgit":
+        if maskgit_num_steps <= 0:
+            raise ValueError(f"maskgit_num_steps must be > 0, got {maskgit_num_steps}")
+        t_grid = torch.linspace(0.0, 1.0, maskgit_num_steps, device=device)
+        dt_grid = torch.zeros_like(t_grid)
+    else:
+        t_grid, dt_grid = time_grid(num_steps, eps=time_eps, device=device)
 
     actions_hidden_states = None
     num_changed_per_step = []
     step_masked_count = []
+    mask_len_per_step = []
     debug_p_update = []
     debug_top1_prob = []
     debug_unresolved = []
@@ -174,10 +182,10 @@ def dfm_decode(
             mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
             unresolved_count = unresolved.sum(dim=1)
             total_unknown = unknown_init.to(unresolved_count.device)
-            mask_len = torch.floor(total_unknown.float() * mask_ratio).long()
-            mask_len = torch.minimum(mask_len, unresolved_count)
-            if step < (len(t_grid) - 1):
-                mask_len = torch.where(unresolved_count > 0, torch.clamp(mask_len, min=1), mask_len)
+            mask_len = torch.round(total_unknown.float() * mask_ratio).long()
+            mask_len = torch.clamp(mask_len, min=0, max=total_unknown)
+            if debug_level >= 1:
+                mask_len_per_step.append(mask_len.detach().cpu().tolist())
 
             if debug_level >= 2:
                 debug_unresolved.append(int(unresolved.sum().item()))
@@ -189,43 +197,24 @@ def dfm_decode(
 
             prev_cur = cur
             proposal = torch.where(unresolved, sampled_flat, cur)
-            conf = probs.gather(2, sampled_flat.unsqueeze(-1)).squeeze(-1)
-            inf = torch.tensor(float("inf"), device=conf.device)
-            conf = torch.where(unresolved, conf, inf)
+            conf_all = probs.gather(2, proposal.unsqueeze(-1)).squeeze(-1)
+            inf = torch.tensor(float("inf"), device=conf_all.device)
+            conf_all = torch.where(clamp_mask, inf, conf_all)
 
-            if unresolved.any():
-                masking = torch.zeros_like(unresolved)
-                # Rows with no unresolved positions -> keep all unmasked (all False)
-                if (unresolved_count == 0).any():
-                    masking = torch.where(
-                        (unresolved_count == 0).unsqueeze(1),
-                        torch.zeros_like(masking, dtype=torch.bool),
-                        masking,
-                    )
-                # Rows where mask_len == 0 -> fully resolve
+            masking = torch.zeros_like(unresolved)
+            if (total_unknown > 0).any():
+                # Rows where mask_len == 0 -> fully resolve (all False)
                 zero_rows = (mask_len == 0)
-                if zero_rows.any():
-                    masking = torch.where(
-                        zero_rows.unsqueeze(1),
-                        torch.zeros_like(masking, dtype=torch.bool),
-                        masking,
-                    )
-                # Rows where mask_len >= unresolved_count -> keep all unresolved masked
-                full_rows = (mask_len >= unresolved_count) & (unresolved_count > 0)
+                # Rows where mask_len >= total_unknown -> keep all action positions masked
+                full_rows = (mask_len >= total_unknown) & (total_unknown > 0)
                 if full_rows.any():
-                    masking = torch.where(
-                        full_rows.unsqueeze(1),
-                        unresolved,
-                        masking,
-                    )
+                    masking = torch.where(full_rows.unsqueeze(1), ~clamp_mask, masking)
                 # Remaining rows -> MaskGIT-style random top-k over confidence
-                mid_rows = (~zero_rows) & (~full_rows) & (unresolved_count > 0)
+                mid_rows = (~zero_rows) & (~full_rows) & (total_unknown > 0)
                 if mid_rows.any():
-                    mask_len_for_fn = torch.clamp(mask_len, min=1, max=conf.shape[1] - 1)
-                    masking_all = parallel_decode.mask_by_random_topk(conf, mask_len_for_fn, temperature=1.0)
+                    mask_len_for_fn = torch.clamp(mask_len, min=1, max=conf_all.shape[1] - 1)
+                    masking_all = parallel_decode.mask_by_random_topk(conf_all, mask_len_for_fn, temperature=1.0)
                     masking = torch.where(mid_rows.unsqueeze(1), masking_all, masking)
-            else:
-                masking = torch.zeros_like(unresolved)
 
             cur = proposal
             cur = torch.where(masking, mask_token_id, cur)
@@ -319,9 +308,12 @@ def dfm_decode(
         "dfm_n_action_positions": n_action_positions,
         "dfm_n_masked_initial": n_masked_initial,
         "dfm_step_masked_count": step_masked_count,
+        "dfm_maskgit_num_steps": maskgit_num_steps if decode_mode == "maskgit" else None,
     }
     if debug_level >= 1:
         stats["dfm_unresolved_count"] = debug_unresolved
+        if decode_mode == "maskgit":
+            stats["dfm_mask_len_per_step"] = mask_len_per_step
     if debug_level >= 2:
         stats["dfm_p_update"] = debug_p_update
         stats["dfm_top1_prob_mean"] = debug_top1_prob

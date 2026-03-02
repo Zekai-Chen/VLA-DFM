@@ -105,6 +105,7 @@ class GenerateConfig:
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
     dfm_num_steps: int = 64                          # Number of CTMC steps
+    dfm_maskgit_num_steps: int = 12                  # Number of MaskGIT iterations (when decode_mode=maskgit)
     dfm_schedule: str = "linear"                     # Schedule for kappa(t)
     dfm_temperature: float = 1.0                     # Sampling temperature
     dfm_temperature_anneal: str = "none"             # none | linear

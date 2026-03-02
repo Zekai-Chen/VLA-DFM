@@ -127,6 +127,7 @@ class FinetuneConfig:
     dfm_loss_mode: str = "generalized_kl"            # generalized_kl | masked_ce
     dfm_weight_clip: float = 20.0                    # Clamp kappa_dot/(1-kappa)
     dfm_train_mode: str = "flow"                     # flow | diffusion_like
+    dfm_maskgit_num_steps: int = 12                  # MaskGIT iterations (for inference config)
 
     # fmt: on
 
@@ -161,6 +162,7 @@ def _apply_finetune_cfg_to_model_config(cfg, model_config, processor) -> None:
     model_config.dfm_loss_mode = cfg.dfm_loss_mode
     model_config.dfm_weight_clip = cfg.dfm_weight_clip
     model_config.dfm_train_mode = cfg.dfm_train_mode
+    model_config.dfm_maskgit_num_steps = cfg.dfm_maskgit_num_steps
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
