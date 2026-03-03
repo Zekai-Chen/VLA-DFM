@@ -78,9 +78,13 @@ NUM_TRIALS=2
 # Optional action vocab overrides (empty = use checkpoint config)
 ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-}
 ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-}
-# Prefer checkpoint model code/config by default
-SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-False}
+# Prefer repo model code/config by default while debugging
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
+DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
+DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
+GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -219,6 +223,10 @@ start_job() {
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+      --debug_log_every ${DEBUG_LOG_EVERY} \
+      --gripper_audit ${GRIPPER_AUDIT} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

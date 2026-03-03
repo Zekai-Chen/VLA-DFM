@@ -380,6 +380,26 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         trust_remote_code=True,
     )
 
+    # Log logic fingerprints + file paths for debugging
+    try:
+        import inspect
+        import importlib
+
+        model_mod = importlib.import_module(vla.__class__.__module__)
+        model_rev = getattr(model_mod, "MODEL_LOGIC_REV", "unknown")
+        print(f"[logic] MODEL_LOGIC_REV={model_rev}")
+        print(f"[logic] model_class_file={inspect.getfile(vla.__class__)}")
+        try:
+            from prismatic.discrete_flow import dfm_decode as dfm_decode_module
+
+            dfm_rev = getattr(dfm_decode_module, "DFM_DECODE_REV", "unknown")
+            print(f"[logic] DFM_DECODE_REV={dfm_rev}")
+            print(f"[logic] dfm_decode_file={inspect.getfile(dfm_decode_module)}")
+        except Exception as exc:
+            print(f"[logic] DFM decode fingerprint unavailable: {exc}")
+    except Exception as exc:
+        print(f"[logic] Logic fingerprint unavailable: {exc}")
+
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
     if cfg.use_film:
         vla = _apply_film_to_vla(vla, cfg)

@@ -22,6 +22,8 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
+MODEL_LOGIC_REV = "2026-03-03-maskgit-12step-remask-gripper-audit"
+
 from prismatic.discrete_flow import (
     dfm_decode,
     kappa,

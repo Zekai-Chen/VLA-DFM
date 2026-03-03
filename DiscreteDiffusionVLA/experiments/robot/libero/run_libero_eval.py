@@ -90,6 +90,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+_GRIPPER_DEBUG_WARNED = False
 
 
 @dataclass
@@ -101,7 +102,7 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
-    sync_model_logic: bool = False                   # If True, overwrite checkpoint logic with repo code
+    sync_model_logic: bool = True                    # If True, overwrite checkpoint logic with repo code
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
@@ -147,6 +148,9 @@ class GenerateConfig:
 
     # Gripper audit
     gripper_audit: bool = False                      # If True, collect per-chunk gripper stats + token hist
+    gripper_debug_raw: bool = False                  # If True, bypass gripper postprocess for sanity runs
+    debug_log_all_metrics: bool = True               # If True, emit full debug payloads into eval log
+    debug_log_every: int = 1                         # Emit debug payload every N chunks (1 = every)
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -390,6 +394,54 @@ def _log_dfm_params(cfg: GenerateConfig, model, log_file=None) -> None:
         log_file,
     )
 
+
+def _log_eval_banner(cfg: GenerateConfig, log_file=None) -> None:
+    log_message(
+        "[eval_config] "
+        f"sync_model_logic={cfg.sync_model_logic} "
+        f"use_checkpoint_defaults={getattr(cfg, 'use_checkpoint_defaults', True)} "
+        f"gripper_debug_raw={cfg.gripper_debug_raw} "
+        f"gripper_audit={cfg.gripper_audit} "
+        f"debug_log_all_metrics={cfg.debug_log_all_metrics} "
+        f"debug_log_every={cfg.debug_log_every} "
+        f"dfm_decode_mode={cfg.dfm_decode_mode}",
+        log_file,
+    )
+
+
+def _to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if torch.is_tensor(obj):
+        return obj.detach().cpu().tolist()
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()
+    return obj
+
+
+def _emit_debug_payload(payload: dict, log_file=None) -> None:
+    payload = _to_jsonable(payload)
+    log_message(f"[debug] {json.dumps(payload, separators=(',', ':'))}", log_file)
+
+
+def _compute_action_stats(arr: np.ndarray) -> dict:
+    if arr is None:
+        return {"min": None, "max": None, "mean": None, "std": None, "clip_frac": None}
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return {"min": None, "max": None, "mean": None, "std": None, "clip_frac": None}
+    return {
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "clip_frac": float(np.mean(np.abs(arr) >= 1.0)),
+    }
+
 def _normalize_actions(actions_unnorm: np.ndarray, stats: dict) -> np.ndarray:
     mask = stats.get("mask", np.ones_like(stats["min"], dtype=bool))
     if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
@@ -430,7 +482,10 @@ def _update_gripper_audit(
         return
 
     raw_gripper = actions_np.reshape(-1, actions_np.shape[-1])[:, -1]
-    post_actions = np.stack([process_action(a.copy(), cfg.model_family) for a in actions_np], axis=0)
+    post_actions = np.stack(
+        [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
+        axis=0,
+    )
     post_gripper = post_actions.reshape(-1, post_actions.shape[-1])[:, -1]
 
     audit_state["gripper_raw"].extend(raw_gripper.tolist())
@@ -658,7 +713,7 @@ def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, tas
         actions_unnorm = model._unnormalize_actions(actions_norm, cfg.unnorm_key)
         success = False
         for action in actions_unnorm:
-            action_proc = process_action(action, cfg.model_family)
+            action_proc = process_action(action, cfg.model_family, cfg.gripper_debug_raw)
             obs, reward, done, info = env.step(action_proc.tolist())
             if done:
                 success = True
@@ -721,8 +776,15 @@ def prepare_observation(obs, resize_size):
     return observation, img  # Return both processed observation and original image for replay
 
 
-def process_action(action, model_family):
+def process_action(action, model_family, gripper_debug_raw: bool = False):
     """Process action before sending to environment."""
+    global _GRIPPER_DEBUG_WARNED
+    if gripper_debug_raw:
+        if not _GRIPPER_DEBUG_WARNED:
+            _GRIPPER_DEBUG_WARNED = True
+            print("WARNING: gripper_debug_raw enabled; skipping gripper postprocess (binarize/invert).")
+        return action
+
     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
     action = normalize_gripper_action(action, binarize=True)
 
@@ -833,7 +895,7 @@ def run_episode(
                                 float(np.mean(np.abs(actions_np) >= 1.0)) if actions_np.size else None
                             )
                             post_actions = np.stack(
-                                [process_action(a.copy(), cfg.model_family) for a in actions_np],
+                                [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
                                 axis=0,
                             ) if actions_np.size else actions_np
                             if post_actions.size > 0:
@@ -929,6 +991,60 @@ def run_episode(
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
 
+                if cfg.debug_log_all_metrics and (cfg.debug_log_every <= 1 or (chunk_idx % cfg.debug_log_every == 0)):
+                    actions_np = np.asarray(actions) if actions is not None else np.asarray([])
+                    if actions_np.size > 0:
+                        actions_post = np.stack(
+                            [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
+                            axis=0,
+                        )
+                    else:
+                        actions_post = actions_np
+
+                    gripper_raw = (
+                        actions_np.reshape(-1, actions_np.shape[-1])[:, -1].tolist()
+                        if actions_np.size > 0
+                        else []
+                    )
+                    gripper_post = (
+                        actions_post.reshape(-1, actions_post.shape[-1])[:, -1].tolist()
+                        if actions_post.size > 0
+                        else []
+                    )
+
+                    payload = {
+                        "task": task_description,
+                        "task_id": task_id,
+                        "episode": episode_idx,
+                        "env_step": t,
+                        "chunk_idx": chunk_idx,
+                        "seed": cfg.seed,
+                        "model_family": cfg.model_family,
+                        "unnorm_key": getattr(cfg, "unnorm_key", None),
+                        "actions_raw": actions_np.tolist() if actions_np.size > 0 else [],
+                        "actions_post": actions_post.tolist() if actions_post.size > 0 else [],
+                        "action_unnorm_stats": _compute_action_stats(actions_np),
+                        "action_postprocess_stats": _compute_action_stats(actions_post),
+                        "gripper_raw": gripper_raw,
+                        "gripper_post": gripper_post,
+                        "gripper_debug_raw": cfg.gripper_debug_raw,
+                    }
+
+                    if debug is not None:
+                        payload["model_debug"] = debug
+
+                    if action_tokenizer is not None and action_stats is not None and actions_np.size > 0:
+                        try:
+                            actions_norm = _normalize_actions(actions_np, action_stats)
+                            token_ids = action_tokenizer.encode_actions_to_token_ids(actions_norm).reshape(-1)
+                            payload["action_token_ids"] = token_ids.tolist()
+                            offsets = _gripper_offsets(ACTION_DIM, NUM_ACTIONS_CHUNK)
+                            payload["gripper_token_ids"] = token_ids[offsets].tolist()
+                        except Exception as exc:
+                            payload["tokenize_error"] = str(exc)
+
+                    _emit_debug_payload(payload, log_file)
+
                 if cfg.gripper_audit and action_tokenizer is not None and action_stats is not None:
                     _update_gripper_audit(
                         actions=actions,
@@ -966,7 +1082,7 @@ def run_episode(
             action = action_queue.popleft()
 
             # Process action
-            action = process_action(action, cfg.model_family)
+            action = process_action(action, cfg.model_family, cfg.gripper_debug_raw)
 
             # Execute action in environment
             obs, reward, done, info = env.step(action.tolist())
@@ -1118,6 +1234,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+    _log_eval_banner(cfg, log_file)
     _log_action_vocab_summary(model, processor, log_file)
     _log_dfm_params(cfg, model, log_file)
 

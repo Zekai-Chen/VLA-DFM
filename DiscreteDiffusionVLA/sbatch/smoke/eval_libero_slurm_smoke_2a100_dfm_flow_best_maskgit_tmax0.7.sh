@@ -76,7 +76,7 @@ CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-sm
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
-DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
+DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
 DFM_NUM_STEPS=${DFM_NUM_STEPS:-0}
 DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-0}
@@ -86,8 +86,12 @@ DFM_SCHEDULE=${DFM_SCHEDULE:-auto}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
-SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-False}
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
+DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
+DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
+GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -219,6 +223,10 @@ start_job() {
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+      --debug_log_every ${DEBUG_LOG_EVERY} \
+      --gripper_audit ${GRIPPER_AUDIT} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

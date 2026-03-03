@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from .dfm_schedule import kappa, kappa_dot, time_grid
 from . import parallel_decode
 
+DFM_DECODE_REV = "2026-03-03-maskgit-12step-remask"
+
 
 @torch.no_grad()
 def dfm_decode(
