@@ -733,6 +733,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         time_eps: float = 1e-3,
         t_min: float = 0.0,
         t_max: float = 1.0,
+        t_bias_alpha: float = 1.0,
     ):
         """
         Apply mask-only corruption following a DFM mixture path.
@@ -746,7 +747,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         t_high = min(t_max, 1.0 - time_eps)
         if t_high <= t_low:
             raise ValueError("Invalid DFM time range after applying eps clamp.")
-        t = torch.rand(B, device=device) * (t_high - t_low) + t_low
+        u = torch.rand(B, device=device)
+        if t_bias_alpha is not None and t_bias_alpha != 1.0:
+            u = torch.pow(u, t_bias_alpha)
+        t = u * (t_high - t_low) + t_low
         kappa_t = kappa(t, schedule=schedule)
         kdot_t = kappa_dot(t, schedule=schedule)
 
@@ -838,6 +842,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_loss_mode: Optional[str] = None,
         dfm_weight_clip: float = 20.0,
         dfm_train_mode: Optional[str] = None,
+        dfm_t_bias_alpha: Optional[float] = None,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -866,6 +871,8 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
         dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
         dfm_train_mode = dfm_train_mode or "flow"
+        if dfm_t_bias_alpha is None:
+            dfm_t_bias_alpha = getattr(self.config, "dfm_t_bias_alpha", 1.0)
 
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
@@ -1019,6 +1026,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                         time_eps=dfm_time_eps,
                         t_min=dfm_t_min,
                         t_max=dfm_t_max,
+                        t_bias_alpha=dfm_t_bias_alpha,
                     )
                     denom = (1.0 - kappa_t).clamp(min=1e-8)
                     dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)

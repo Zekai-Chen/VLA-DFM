@@ -9,11 +9,11 @@ import logging
 import os
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import draccus
 import numpy as np
@@ -54,7 +54,13 @@ from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.training.train_utils import compute_token_accuracy, get_current_action_mask
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK, STOP_INDEX
+from prismatic.vla.constants import (
+    ACTION_DIM,
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+    NUM_ACTIONS_CHUNK,
+    NormalizationType,
+    STOP_INDEX,
+)
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 
 
@@ -131,6 +137,9 @@ class GenerateConfig:
     dfm_min_valid_action_frac: float = 0.999         # Fail-fast threshold for in-action fraction
     dfm_max_mask_frac: float = 0.0                   # Fail-fast threshold for final mask fraction
     dfm_max_nan_frac: float = 0.0                    # Fail-fast threshold for NaN action fraction
+
+    # Gripper audit
+    gripper_audit: bool = False                      # If True, collect per-chunk gripper stats + token hist
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -276,6 +285,119 @@ def log_message(message: str, log_file=None):
     if log_file:
         log_file.write(message + "\n")
         log_file.flush()
+
+
+def _normalize_actions(actions_unnorm: np.ndarray, stats: dict) -> np.ndarray:
+    mask = stats.get("mask", np.ones_like(stats["min"], dtype=bool))
+    if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+        high = np.asarray(stats["max"])
+        low = np.asarray(stats["min"])
+    elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+        high = np.asarray(stats["q99"])
+        low = np.asarray(stats["q01"])
+    else:
+        raise ValueError(f"Unsupported normalization type: {ACTION_PROPRIO_NORMALIZATION_TYPE}")
+    normed = np.where(
+        mask,
+        2 * (actions_unnorm - low) / (high - low + 1e-8) - 1.0,
+        actions_unnorm,
+    )
+    return np.clip(normed, -1.0, 1.0)
+
+
+def _gripper_offsets(action_dim: int, num_actions_chunk: int) -> List[int]:
+    return [action_dim - 1 + i * action_dim for i in range(num_actions_chunk)]
+
+
+def _update_gripper_audit(
+    actions: np.ndarray,
+    cfg: GenerateConfig,
+    action_tokenizer: ActionTokenizer,
+    action_stats: dict,
+    audit_state: dict,
+    audit_writer=None,
+    task_id: Optional[int] = None,
+    episode_idx: Optional[int] = None,
+    chunk_idx: Optional[int] = None,
+) -> None:
+    if actions is None or audit_state is None:
+        return
+    actions_np = np.asarray(actions)
+    if actions_np.size == 0:
+        return
+
+    raw_gripper = actions_np.reshape(-1, actions_np.shape[-1])[:, -1]
+    post_actions = np.stack([process_action(a.copy(), cfg.model_family) for a in actions_np], axis=0)
+    post_gripper = post_actions.reshape(-1, post_actions.shape[-1])[:, -1]
+
+    audit_state["gripper_raw"].extend(raw_gripper.tolist())
+    audit_state["gripper_post"].extend(post_gripper.tolist())
+
+    # Token histogram for gripper positions
+    try:
+        actions_norm = _normalize_actions(actions_np, action_stats)
+        token_ids = action_tokenizer.encode_actions_to_token_ids(actions_norm).reshape(-1)
+        offsets = _gripper_offsets(ACTION_DIM, NUM_ACTIONS_CHUNK)
+        gripper_token_ids = token_ids[offsets]
+        audit_state["gripper_token_hist"].update(gripper_token_ids.tolist())
+    except Exception:
+        gripper_token_ids = []
+
+    audit_state["chunks"] += 1
+
+    if audit_writer is not None:
+        audit_writer.write(
+            {
+                "task_id": task_id,
+                "episode": episode_idx,
+                "chunk_idx": chunk_idx,
+                "gripper_raw": raw_gripper.tolist(),
+                "gripper_post": post_gripper.tolist(),
+                "gripper_token_ids": list(gripper_token_ids),
+            }
+        )
+
+
+def _log_gripper_audit_summary(audit_state: dict, log_file=None) -> None:
+    if not audit_state or not audit_state.get("gripper_raw"):
+        log_message("[gripper_audit] no data collected", log_file)
+        return
+
+    raw = np.asarray(audit_state["gripper_raw"], dtype=np.float32)
+    post = np.asarray(audit_state["gripper_post"], dtype=np.float32)
+    close_rate = float(np.mean(post > 0))
+
+    def _summary(arr: np.ndarray) -> dict:
+        return {
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+        }
+
+    raw_summary = _summary(raw)
+    post_summary = _summary(post)
+    raw_hist = np.histogram(raw, bins=10)
+    post_hist = np.histogram(post, bins=10)
+
+    log_message(
+        f"[gripper_audit] chunks={audit_state.get('chunks', 0)} close_rate={close_rate:.4f}",
+        log_file,
+    )
+    log_message(f"[gripper_audit] gripper_raw_summary={raw_summary}", log_file)
+    log_message(f"[gripper_audit] gripper_post_summary={post_summary}", log_file)
+    log_message(
+        f"[gripper_audit] gripper_raw_hist_bins={raw_hist[1].tolist()} counts={raw_hist[0].tolist()}",
+        log_file,
+    )
+    log_message(
+        f"[gripper_audit] gripper_post_hist_bins={post_hist[1].tolist()} counts={post_hist[0].tolist()}",
+        log_file,
+    )
+    log_message(
+        f"[gripper_audit] gripper_token_hist={dict(sorted(audit_state['gripper_token_hist'].items()))}",
+        log_file,
+    )
 
 
 def _compute_num_patches(model, use_proprio: bool) -> int:
@@ -510,6 +632,10 @@ def run_episode(
     proprio_projector=None,
     noisy_action_projector=None,
     initial_state=None,
+    gripper_audit_state=None,
+    gripper_audit_writer=None,
+    action_tokenizer: Optional[ActionTokenizer] = None,
+    action_stats: Optional[dict] = None,
     log_file=None,
 ):
     """Run a single episode in the environment."""
@@ -559,7 +685,6 @@ def run_episode(
             # If action queue is empty, requery model
             if len(action_queue) == 0:
                 debug = None
-                # Query model to get action
                 if cfg.dfm_debug and cfg.use_discrete_flow_matching:
                     actions, debug = get_action(
                         cfg,
@@ -637,7 +762,6 @@ def run_episode(
                                 "dfm_unresolved_count": dfm_stats.get("dfm_unresolved_count"),
                                 "dfm_num_changed_tokens": dfm_stats.get("dfm_num_changed_tokens"),
                             }
-                        # Integrity check for maskgit decoding
                         if cfg.dfm_decode_mode == "maskgit":
                             dfm_stats = debug.get("dfm_stats", {}) if debug is not None else {}
                             n_action = dfm_stats.get("dfm_n_action_positions")
@@ -689,6 +813,19 @@ def run_episode(
                         use_discrete_flow_matching=cfg.use_discrete_flow_matching,
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
+
+                if cfg.gripper_audit and action_tokenizer is not None and action_stats is not None:
+                    _update_gripper_audit(
+                        actions=actions,
+                        cfg=cfg,
+                        action_tokenizer=action_tokenizer,
+                        action_stats=action_stats,
+                        audit_state=gripper_audit_state,
+                        audit_writer=gripper_audit_writer,
+                        task_id=task_id,
+                        episode_idx=episode_idx,
+                        chunk_idx=chunk_idx,
+                    )
                 chunk_idx += 1
                 if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
                     dfm_stats = model.last_dfm_stats or {}
@@ -702,18 +839,11 @@ def run_episode(
                         "DFM/Num Changed Mean": num_changed_mean,
                     }
                     mask_frac_final = dfm_stats.get("dfm_mask_frac_final", None)
+                    in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
                     if mask_frac_final is not None:
                         log_payload["DFM/Mask Frac Final"] = mask_frac_final
-                    in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
                     if in_action_frac is not None:
-                        log_payload["DFM/InActionFracFinal"] = in_action_frac
-                    if debug is not None:
-                        changed_off = debug.get("changed_off_action_count")
-                        if changed_off is not None:
-                            log_payload["DFM/ChangedOffActionCount"] = changed_off
-                        stop_corrupted = debug.get("stop_token_corrupted")
-                        if stop_corrupted is not None:
-                            log_payload["DFM/StopTokenCorrupted"] = float(stop_corrupted)
+                        log_payload["DFM/In Action Frac Final"] = in_action_frac
                     wandb.log(log_payload)
                 action_queue.extend(actions)
 
@@ -757,6 +887,10 @@ def run_task(
     action_head=None,
     proprio_projector=None,
     noisy_action_projector=None,
+    gripper_audit_state=None,
+    gripper_audit_writer=None,
+    action_tokenizer: Optional[ActionTokenizer] = None,
+    action_stats: Optional[dict] = None,
     total_episodes=0,
     total_successes=0,
     log_file=None,
@@ -809,6 +943,10 @@ def run_task(
             proprio_projector,
             noisy_action_projector,
             initial_state,
+            gripper_audit_state,
+            gripper_audit_writer,
+            action_tokenizer,
+            action_stats,
             log_file,
         )
 
@@ -860,11 +998,29 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
+    # Action tokenizer for audits/probes
+    n_action_bins = getattr(model.config, "n_action_bins", 256)
+    anchor = getattr(model.config, "action_vocab_anchor", "pad")
+    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
+    action_stats = model.get_action_stats(cfg.unnorm_key)
+
     # Get expected image dimensions
     resize_size = get_image_resize_size(cfg)
 
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+    gripper_audit_writer = None
+    gripper_audit_state = None
+    if cfg.gripper_audit:
+        gripper_audit_state = {
+            "gripper_raw": [],
+            "gripper_post": [],
+            "gripper_token_hist": Counter(),
+            "chunks": 0,
+        }
+        gripper_audit_path = os.path.join(cfg.local_log_dir, run_id + "_gripper_audit.jsonl")
+        gripper_audit_writer = JsonlWriter(gripper_audit_path)
+        log_message(f"[gripper_audit] writing per-chunk logs to {gripper_audit_path}", log_file)
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -890,6 +1046,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
             action_head,
             proprio_projector,
             noisy_action_projector,
+            gripper_audit_state,
+            gripper_audit_writer,
+            action_tokenizer,
+            action_stats,
             total_episodes,
             total_successes,
             log_file,
@@ -913,6 +1073,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
             }
         )
         wandb.save(local_log_filepath)
+
+    if gripper_audit_writer is not None:
+        gripper_audit_writer.close()
+    if cfg.gripper_audit and gripper_audit_state is not None:
+        _log_gripper_audit_summary(gripper_audit_state, log_file)
 
     # Close log file
     if log_file:

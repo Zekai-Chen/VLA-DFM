@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -250,6 +250,122 @@ def _teacher_forced_metrics(
     return metrics
 
 
+def _fixed_mask_denoise_metrics(
+    vla,
+    batch: Dict[str, torch.Tensor],
+    action_tokenizer: ActionTokenizer,
+    proprio_projector,
+    use_proprio: bool,
+    dfm_schedule: str,
+    mask_token_id: int,
+    mask_ratio: float,
+    gripper_offsets: List[int],
+) -> Dict[str, float]:
+    device = next(vla.parameters()).device
+    pixel_dtype = torch.bfloat16
+    if hasattr(vla, "vision_backbone") and hasattr(vla.vision_backbone, "half_precision_dtype"):
+        pixel_dtype = vla.vision_backbone.half_precision_dtype
+
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
+    pixel_values = batch["pixel_values"].to(device, dtype=pixel_dtype)
+    proprio = batch.get("proprio")
+    if proprio is not None:
+        proprio = proprio.to(device)
+        if proprio_projector is not None:
+            try:
+                proj_dtype = next(proprio_projector.parameters()).dtype
+                proprio = proprio.to(dtype=proj_dtype)
+            except StopIteration:
+                pass
+
+    action_begin = action_tokenizer.action_token_begin_idx
+    action_end = action_tokenizer.action_token_end_idx
+    action_mask_labels = (labels >= action_begin) & (labels < action_end)
+
+    if mask_ratio <= 0.0:
+        masked_mask = torch.zeros_like(action_mask_labels, dtype=torch.bool)
+        eval_override = action_mask_labels
+    else:
+        num_action = action_mask_labels.sum(dim=1)
+        num_mask = torch.round(num_action.float() * mask_ratio).long()
+        num_mask = torch.clamp(num_mask, min=1)
+        rand = torch.rand_like(action_mask_labels.float())
+        rand = torch.where(action_mask_labels, rand, torch.full_like(rand, 2.0))
+        perm = rand.argsort(dim=1)
+        ranks = perm.argsort(dim=1)
+        masked_mask = (ranks < num_mask[:, None]) & action_mask_labels
+
+    masked_input_ids = input_ids.clone()
+    masked_input_ids[masked_mask] = mask_token_id
+
+    with torch.no_grad():
+        output = vla(
+            input_ids=masked_input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            labels=labels,
+            output_hidden_states=False,
+            proprio=proprio if use_proprio else None,
+            proprio_projector=proprio_projector if use_proprio else None,
+            use_film=False,
+            dfm_schedule=dfm_schedule,
+        )
+
+    num_patches = _compute_num_patches(vla, use_proprio)
+    logits = output.logits[:, num_patches:-1, :]
+    gt_tokens = labels[:, 1:]
+    min_len = min(logits.shape[1], gt_tokens.shape[1])
+    logits = logits[:, :min_len]
+    gt_tokens = gt_tokens[:, :min_len]
+    pred_tokens = logits.argmax(dim=-1)
+
+    action_mask = (gt_tokens >= action_begin) & (gt_tokens < action_end)
+    masked_eval = masked_mask[:, 1:][:, :min_len]
+    if mask_ratio <= 0.0:
+        masked_action_mask = eval_override[:, 1:][:, :min_len] & action_mask
+    else:
+        masked_action_mask = masked_eval & action_mask
+
+    metrics: Dict[str, float] = {}
+    if masked_action_mask.sum().item() > 0:
+        masked_action_logits = logits[masked_action_mask]
+        masked_targets = gt_tokens[masked_action_mask]
+        masked_ce = F.cross_entropy(masked_action_logits, masked_targets, reduction="mean")
+        masked_acc = compute_token_accuracy(pred_tokens, gt_tokens, masked_action_mask)
+        metrics["masked_denoise_action_ce"] = float(masked_ce.item())
+        metrics["masked_denoise_action_acc"] = float(masked_acc.item())
+    else:
+        metrics["masked_denoise_action_ce"] = float("nan")
+        metrics["masked_denoise_action_acc"] = float("nan")
+
+    # Gripper-only metrics (restricted to gripper token positions)
+    gripper_mask = torch.zeros_like(action_mask_labels, dtype=torch.bool)
+    for b in range(action_mask_labels.shape[0]):
+        positions = torch.nonzero(action_mask_labels[b]).flatten()
+        if positions.numel() >= (ACTION_DIM * NUM_ACTIONS_CHUNK):
+            gripper_positions = positions[gripper_offsets]
+            gripper_mask[b, gripper_positions] = True
+    gripper_mask_eval = gripper_mask[:, 1:][:, :min_len]
+    if mask_ratio <= 0.0:
+        masked_gripper_mask = gripper_mask_eval
+    else:
+        masked_gripper_mask = masked_eval & gripper_mask_eval
+    if masked_gripper_mask.sum().item() > 0:
+        gripper_logits = logits[masked_gripper_mask]
+        gripper_targets = gt_tokens[masked_gripper_mask]
+        gripper_ce = F.cross_entropy(gripper_logits, gripper_targets, reduction="mean")
+        gripper_acc = compute_token_accuracy(pred_tokens, gt_tokens, masked_gripper_mask)
+        metrics["masked_denoise_gripper_ce"] = float(gripper_ce.item())
+        metrics["masked_denoise_gripper_acc"] = float(gripper_acc.item())
+    else:
+        metrics["masked_denoise_gripper_ce"] = float("nan")
+        metrics["masked_denoise_gripper_acc"] = float("nan")
+
+    return metrics
+
+
 def _evaluate_checkpoint(
     label: str,
     checkpoint: str,
@@ -268,6 +384,7 @@ def _evaluate_checkpoint(
     check_image_parity: bool,
     mask_embed_override: str = "none",
     compute_masked_denoise: bool = True,
+    mask_ratios: Optional[List[float]] = None,
 ) -> Dict[str, float]:
     cfg = SimpleNamespace(
         model_family="openvla",
@@ -358,6 +475,18 @@ def _evaluate_checkpoint(
     masked_ce_sum = 0.0
     masked_acc_sum = 0.0
     masked_count = 0
+    mask_curve = {}
+    gripper_offsets = [ACTION_DIM - 1 + i * ACTION_DIM for i in range(NUM_ACTIONS_CHUNK)]
+    if mask_ratios:
+        for ratio in mask_ratios:
+            mask_curve[ratio] = {
+                "ce_sum": 0.0,
+                "acc_sum": 0.0,
+                "count": 0,
+                "g_ce_sum": 0.0,
+                "g_acc_sum": 0.0,
+                "g_count": 0,
+            }
     count = 0
 
     data_iter = iter(dataset)
@@ -451,6 +580,28 @@ def _evaluate_checkpoint(
             masked_acc_sum += tf_metrics["masked_denoise_action_acc"]
             masked_count += 1
 
+        if mask_ratios:
+            for ratio in mask_ratios:
+                ratio_metrics = _fixed_mask_denoise_metrics(
+                    vla=vla,
+                    batch=batch,
+                    action_tokenizer=action_tokenizer,
+                    proprio_projector=proprio_projector,
+                    use_proprio=use_proprio,
+                    dfm_schedule=getattr(vla.config, "dfm_schedule", "cosine"),
+                    mask_token_id=mask_token_id,
+                    mask_ratio=ratio,
+                    gripper_offsets=gripper_offsets,
+                )
+                if not math.isnan(ratio_metrics["masked_denoise_action_ce"]):
+                    mask_curve[ratio]["ce_sum"] += ratio_metrics["masked_denoise_action_ce"]
+                    mask_curve[ratio]["acc_sum"] += ratio_metrics["masked_denoise_action_acc"]
+                    mask_curve[ratio]["count"] += 1
+                if not math.isnan(ratio_metrics["masked_denoise_gripper_ce"]):
+                    mask_curve[ratio]["g_ce_sum"] += ratio_metrics["masked_denoise_gripper_ce"]
+                    mask_curve[ratio]["g_acc_sum"] += ratio_metrics["masked_denoise_gripper_acc"]
+                    mask_curve[ratio]["g_count"] += 1
+
         dfm_stats = (debug or {}).get("dfm_stats", {})
         print(
             f"[{label} batch {count}] token_match={token_match.mean():.3f} seq_match={token_match.all()} "
@@ -480,6 +631,15 @@ def _evaluate_checkpoint(
     if masked_count > 0:
         summary["masked_denoise_action_ce"] = masked_ce_sum / masked_count
         summary["masked_denoise_action_acc"] = masked_acc_sum / masked_count
+    if mask_ratios:
+        for ratio in mask_ratios:
+            entry = mask_curve[ratio]
+            if entry["count"] > 0:
+                summary[f"mask_ratio_{ratio}_action_ce"] = entry["ce_sum"] / entry["count"]
+                summary[f"mask_ratio_{ratio}_action_acc"] = entry["acc_sum"] / entry["count"]
+            if entry["g_count"] > 0:
+                summary[f"mask_ratio_{ratio}_gripper_ce"] = entry["g_ce_sum"] / entry["g_count"]
+                summary[f"mask_ratio_{ratio}_gripper_acc"] = entry["g_acc_sum"] / entry["g_count"]
     summary["mask_embed_override"] = mask_embed_override
 
     print(f"\n=== {label} Summary ===")
@@ -516,6 +676,7 @@ def main() -> None:
     parser.add_argument("--dd_checkpoint", type=str, default="")
     parser.add_argument("--dd_num_steps", type=int, default=64)
     parser.add_argument("--mask_embed_override", type=str, default="none")
+    parser.add_argument("--mask_ratios", type=str, default="")
     parser.add_argument("--primary_mode", type=str, default="dfm", choices=["dfm", "dd"])
     parser.add_argument("--center_crop", type=str, default="True")
     parser.add_argument("--use_proprio", type=str, default="True")
@@ -528,6 +689,10 @@ def main() -> None:
         raise ValueError(f"Unknown primary_mode: {primary_mode}")
 
     primary_label = "DFM" if primary_mode == "dfm" else "DD"
+    mask_ratios = []
+    if args.mask_ratios:
+        mask_ratios = [float(x) for x in args.mask_ratios.split(",") if x.strip() != ""]
+
     dfm_summary = _evaluate_checkpoint(
         label=primary_label,
         checkpoint=args.checkpoint,
@@ -546,6 +711,7 @@ def main() -> None:
         check_image_parity=check_image_parity,
         mask_embed_override=args.mask_embed_override,
         compute_masked_denoise=(primary_mode == "dfm"),
+        mask_ratios=mask_ratios,
     )
 
     compare_dd = _as_bool(args.compare_dd) or bool(args.dd_checkpoint)
@@ -570,6 +736,7 @@ def main() -> None:
             center_crop=_as_bool(args.center_crop),
             use_proprio=_as_bool(args.use_proprio),
             check_image_parity=False,
+            mask_ratios=mask_ratios,
         )
 
 

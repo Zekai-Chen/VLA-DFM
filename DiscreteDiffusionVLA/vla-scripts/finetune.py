@@ -129,6 +129,7 @@ class FinetuneConfig:
     dfm_train_mode: str = "flow"                     # flow | diffusion_like
     dfm_maskgit_num_steps: int = 12                  # MaskGIT iterations (for inference config)
     dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (for inference config)
+    dfm_t_bias_alpha: float = 1.0                    # Low-t bias for DFM sampling (>1 biases low-t)
 
     # fmt: on
 
@@ -165,6 +166,7 @@ def _apply_finetune_cfg_to_model_config(cfg, model_config, processor) -> None:
     model_config.dfm_train_mode = cfg.dfm_train_mode
     model_config.dfm_maskgit_num_steps = cfg.dfm_maskgit_num_steps
     model_config.dfm_maskgit_schedule = cfg.dfm_maskgit_schedule
+    model_config.dfm_t_bias_alpha = cfg.dfm_t_bias_alpha
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -339,6 +341,7 @@ def run_forward_pass(
     dfm_loss_mode: str = "generalized_kl",
     dfm_weight_clip: float = 20.0,
     dfm_train_mode: str = "flow",
+    dfm_t_bias_alpha: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute model forward pass and metrics for both training and validation.
@@ -403,6 +406,7 @@ def run_forward_pass(
             dfm_loss_mode=dfm_loss_mode,
             dfm_weight_clip=dfm_weight_clip,
             dfm_train_mode=dfm_train_mode,
+            dfm_t_bias_alpha=dfm_t_bias_alpha,
         )
 
     # Get action masks needed for logging
@@ -858,6 +862,7 @@ def run_validation(
                 dfm_loss_mode=cfg.dfm_loss_mode,
                 dfm_weight_clip=cfg.dfm_weight_clip,
                 dfm_train_mode=cfg.dfm_train_mode,
+                dfm_t_bias_alpha=cfg.dfm_t_bias_alpha,
             )
 
             # Add the loss value to the metrics
@@ -1251,6 +1256,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 dfm_loss_mode=cfg.dfm_loss_mode,
                 dfm_weight_clip=cfg.dfm_weight_clip,
                 dfm_train_mode=cfg.dfm_train_mode,
+                dfm_t_bias_alpha=cfg.dfm_t_bias_alpha,
             )
 
             # Normalize loss to account for gradient accumulation
