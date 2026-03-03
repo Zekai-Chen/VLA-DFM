@@ -201,6 +201,35 @@ def check_model_logic_mismatch(pretrained_checkpoint: str) -> None:
         _handle_file_sync(curr_filepath, checkpoint_filepath, filename)
 
 
+def ensure_checkpoint_model_logic_files(pretrained_checkpoint: str) -> None:
+    """
+    Ensure model logic files exist in checkpoint without overwriting existing files.
+
+    For backward compatibility, if required files are missing in the checkpoint, copy
+    the current repo versions with a warning.
+    """
+    if not os.path.isdir(pretrained_checkpoint):
+        return
+
+    required_files = {"modeling_prismatic.py": None, "configuration_prismatic.py": None}
+    for root, _, files in os.walk("./prismatic/"):
+        for filename in required_files.keys():
+            if filename in files and required_files[filename] is None:
+                required_files[filename] = os.path.join(root, filename)
+
+    for filename, curr_filepath in required_files.items():
+        if curr_filepath is None:
+            print(f"WARNING: `{filename}` is not found anywhere in the current directory.")
+            continue
+
+        checkpoint_filepath = os.path.join(pretrained_checkpoint, filename)
+        if not os.path.exists(checkpoint_filepath) or os.path.getsize(checkpoint_filepath) == 0:
+            print(
+                f"WARNING: {filename} missing in checkpoint. "
+                "Copying current repo version for compatibility."
+            )
+            shutil.copy2(curr_filepath, checkpoint_filepath)
+
 def find_checkpoint_file(pretrained_checkpoint: str, file_pattern: str) -> str:
     """
     Find a specific checkpoint file matching a pattern.
@@ -277,9 +306,12 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
         AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-        # Update config.json and sync model files
-        update_auto_map(cfg.pretrained_checkpoint)
-        check_model_logic_mismatch(cfg.pretrained_checkpoint)
+        # Update config.json and sync model files (opt-in)
+        if getattr(cfg, "sync_model_logic", False):
+            update_auto_map(cfg.pretrained_checkpoint)
+            check_model_logic_mismatch(cfg.pretrained_checkpoint)
+        else:
+            ensure_checkpoint_model_logic_files(cfg.pretrained_checkpoint)
 
     raw_cfg = {}
     raw_vla_cfg = {}
@@ -325,6 +357,12 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         cfg.action_token_begin_idx = int(override_begin)
 
     config = AutoConfig.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
+    auto_map = getattr(config, "auto_map", None)
+    if auto_map is None or "AutoConfig" not in auto_map or "AutoModelForVision2Seq" not in auto_map:
+        config.auto_map = {
+            "AutoConfig": "configuration_prismatic.OpenVLAConfig",
+            "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
+        }
     if override_anchor is not None:
         config.action_vocab_anchor = override_anchor
     if override_begin is not None:
@@ -345,6 +383,19 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
     if cfg.use_film:
         vla = _apply_film_to_vla(vla, cfg)
+
+    # Log effective action vocab configuration
+    n_action_bins = getattr(vla.config, "n_action_bins", None)
+    action_vocab_anchor = getattr(vla.config, "action_vocab_anchor", None)
+    action_token_begin_idx = getattr(vla.config, "action_token_begin_idx", None)
+    pad_token_id = getattr(vla.config, "pad_token_id", None)
+    print(
+        "[action_vocab] "
+        f"n_action_bins={n_action_bins} "
+        f"anchor={action_vocab_anchor} "
+        f"action_token_begin_idx={action_token_begin_idx} "
+        f"pad_token_id={pad_token_id}"
+    )
 
     # Set number of images in model input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
@@ -916,16 +967,22 @@ def get_vla_action(
         if clamp_values is not None and isinstance(clamp_mask, bool) and not clamp_mask:
             clamp_mask = True
 
-        # Prefer checkpoint schedule when not explicitly set
-        dfm_schedule = getattr(cfg, "dfm_schedule", None)
-        if dfm_schedule in (None, "", "auto"):
-            dfm_schedule = getattr(getattr(vla, "config", None), "dfm_schedule", "cosine")
-        dfm_maskgit_num_steps = getattr(cfg, "dfm_maskgit_num_steps", None)
-        if dfm_maskgit_num_steps in (None, 0):
-            dfm_maskgit_num_steps = getattr(getattr(vla, "config", None), "dfm_maskgit_num_steps", 12)
-        dfm_maskgit_schedule = getattr(cfg, "dfm_maskgit_schedule", None)
-        if dfm_maskgit_schedule in (None, "", "auto"):
-            dfm_maskgit_schedule = getattr(getattr(vla, "config", None), "dfm_maskgit_schedule", "cosine")
+        def _resolve_cfg_value(name: str, empty_values: tuple, default: Any) -> Any:
+            value = getattr(cfg, name, None)
+            if value in empty_values:
+                if getattr(cfg, "use_checkpoint_defaults", True):
+                    value = getattr(getattr(vla, "config", None), name, default)
+                else:
+                    value = default
+            return value
+
+        dfm_schedule = _resolve_cfg_value("dfm_schedule", (None, "", "auto"), "cosine")
+        dfm_maskgit_num_steps = _resolve_cfg_value("dfm_maskgit_num_steps", (None, 0), 12)
+        dfm_maskgit_schedule = _resolve_cfg_value("dfm_maskgit_schedule", (None, "", "auto"), "cosine")
+        dfm_num_steps = _resolve_cfg_value("dfm_num_steps", (None, 0), 12)
+        dfm_time_eps = _resolve_cfg_value("dfm_time_eps", (None, -1, -1.0), 1e-3)
+        dfm_step_min = _resolve_cfg_value("dfm_step_min", (None, -1, -1.0), 1e-4)
+        dfm_step_max = _resolve_cfg_value("dfm_step_max", (None, -1, -1.0), 0.2)
 
         # Generate action
         if action_head is None:
@@ -942,16 +999,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -1002,16 +1059,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -1035,16 +1092,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -1068,16 +1125,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),

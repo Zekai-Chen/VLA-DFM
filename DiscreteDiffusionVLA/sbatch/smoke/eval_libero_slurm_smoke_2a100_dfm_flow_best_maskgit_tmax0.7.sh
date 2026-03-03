@@ -78,14 +78,16 @@ NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
-DFM_NUM_STEPS=${DFM_NUM_STEPS:-12}
-DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-12}
-DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-cosine}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-0}
+DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-0}
+DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-auto}
 DFM_TEMPERATURE=${DFM_TEMPERATURE:-0.0}
-DFM_SCHEDULE=${DFM_SCHEDULE:-}
+DFM_SCHEDULE=${DFM_SCHEDULE:-auto}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-False}
+USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -109,23 +111,6 @@ elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
   CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
 fi
 export CKPT_PATH
-
-if [[ -z "${DFM_SCHEDULE}" ]]; then
-  DFM_SCHEDULE=$(python - <<'PY'
-import json, os
-ckpt = os.environ.get("CKPT_PATH")
-if not ckpt:
-    print("cosine")
-    raise SystemExit(0)
-cfg_path = os.path.join(ckpt, "config.json")
-if not os.path.exists(cfg_path):
-    print("cosine")
-    raise SystemExit(0)
-cfg = json.load(open(cfg_path))
-print(cfg.get("dfm_schedule", "cosine"))
-PY
-)
-fi
 
 python - <<'PY'
 import json, os, sys
@@ -232,6 +217,8 @@ start_job() {
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
       --pretrained_checkpoint "${CKPT_PATH}" \
+      --sync_model_logic ${SYNC_MODEL_LOGIC} \
+      --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

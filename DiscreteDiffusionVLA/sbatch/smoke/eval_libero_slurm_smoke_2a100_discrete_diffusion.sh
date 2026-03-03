@@ -75,9 +75,12 @@ mkdir -p "$LOG_DIR"
 CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-20k--20260302_1306"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
-# Default to legacy action vocab for pre-anchor checkpoints (model not retrained).
-ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
-ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
+# Optional action vocab overrides (empty = use checkpoint config)
+ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-}
+# Prefer checkpoint model code/config by default
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-False}
+USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -214,6 +217,8 @@ start_job() {
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
       --pretrained_checkpoint "${CKPT_PATH}" \
+      --sync_model_logic ${SYNC_MODEL_LOGIC} \
+      --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

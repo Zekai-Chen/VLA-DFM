@@ -101,6 +101,7 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    sync_model_logic: bool = False                   # If True, overwrite checkpoint logic with repo code
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
@@ -110,16 +111,16 @@ class GenerateConfig:
     use_discrete_diffusion: bool = False             # If True, uses discrete diffusion model for action generation
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
-    dfm_num_steps: int = 64                          # Number of CTMC steps
-    dfm_maskgit_num_steps: int = 12                  # Number of MaskGIT iterations (when decode_mode=maskgit)
-    dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (when decode_mode=maskgit)
-    dfm_schedule: str = "linear"                     # Schedule for kappa(t)
+    dfm_num_steps: int = 0                           # Number of CTMC steps (0 = use checkpoint config)
+    dfm_maskgit_num_steps: int = 0                   # Number of MaskGIT iterations (0 = use checkpoint config)
+    dfm_maskgit_schedule: str = "auto"               # MaskGIT schedule (auto = use checkpoint config)
+    dfm_schedule: str = "auto"                       # Schedule for kappa(t) (auto = use checkpoint config)
     dfm_temperature: float = 1.0                     # Sampling temperature
     dfm_temperature_anneal: str = "none"             # none | linear
     dfm_adaptive_step: bool = True                   # Adaptive step size for CTMC
     dfm_step_min: float = 1e-4                       # Minimum step size
     dfm_step_max: float = 0.2                        # Maximum step size
-    dfm_time_eps: float = 1e-3                       # Avoid t endpoints
+    dfm_time_eps: float = -1.0                       # Avoid t endpoints (-1 = use checkpoint config)
     dfm_early_exit: bool = False                     # Stop if no tokens change
     dfm_early_exit_frac: float = 0.0                 # Stop if changed/total < frac
     dfm_corrector: bool = False                      # Optional remask corrector
@@ -128,6 +129,8 @@ class GenerateConfig:
     dfm_clamp_mask: bool = False                     # Clamp non-mask tokens during CTMC
     dfm_clamp_values: Optional[str] = None           # Optional clamp values spec/path
     dfm_decode_mode: str = "ctmc"                    # DFM decode mode: ctmc | maskgit
+
+    use_checkpoint_defaults: bool = True             # Prefer checkpoint config when eval params are unset
 
     # DFM debug / tracing
     dfm_debug: bool = False                          # If True, emit per-chunk debug payloads
@@ -347,6 +350,43 @@ def _log_action_vocab_summary(model, processor, log_file=None) -> None:
     )
     log_message(
         f"[action_vocab] action_range=[{action_begin}, {action_end})",
+        log_file,
+    )
+
+
+def _resolve_dfm_param(cfg: GenerateConfig, model_cfg, name: str, empty_values: tuple, default):
+    value = getattr(cfg, name, None)
+    if value in empty_values:
+        if getattr(cfg, "use_checkpoint_defaults", True):
+            value = getattr(model_cfg, name, default)
+        else:
+            value = default
+    return value
+
+
+def _log_dfm_params(cfg: GenerateConfig, model, log_file=None) -> None:
+    if model is None or not hasattr(model, "config"):
+        return
+    model_cfg = model.config
+    dfm_num_steps = _resolve_dfm_param(cfg, model_cfg, "dfm_num_steps", (None, 0), 12)
+    dfm_schedule = _resolve_dfm_param(cfg, model_cfg, "dfm_schedule", (None, "", "auto"), "cosine")
+    dfm_maskgit_num_steps = _resolve_dfm_param(cfg, model_cfg, "dfm_maskgit_num_steps", (None, 0), 12)
+    dfm_maskgit_schedule = _resolve_dfm_param(cfg, model_cfg, "dfm_maskgit_schedule", (None, "", "auto"), "cosine")
+    dfm_time_eps = _resolve_dfm_param(cfg, model_cfg, "dfm_time_eps", (None, -1, -1.0), 1e-3)
+    dfm_step_min = _resolve_dfm_param(cfg, model_cfg, "dfm_step_min", (None, -1, -1.0), 1e-4)
+    dfm_step_max = _resolve_dfm_param(cfg, model_cfg, "dfm_step_max", (None, -1, -1.0), 0.2)
+
+    log_message(
+        "[dfm_eval] "
+        f"use_checkpoint_defaults={getattr(cfg, 'use_checkpoint_defaults', True)} "
+        f"decode_mode={cfg.dfm_decode_mode} "
+        f"dfm_num_steps={dfm_num_steps} "
+        f"dfm_schedule={dfm_schedule} "
+        f"dfm_maskgit_num_steps={dfm_maskgit_num_steps} "
+        f"dfm_maskgit_schedule={dfm_maskgit_schedule} "
+        f"dfm_time_eps={dfm_time_eps} "
+        f"dfm_step_min={dfm_step_min} "
+        f"dfm_step_max={dfm_step_max}",
         log_file,
     )
 
@@ -1079,6 +1119,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
     _log_action_vocab_summary(model, processor, log_file)
+    _log_dfm_params(cfg, model, log_file)
 
     # Action tokenizer for audits only (probes build their own to keep dependencies optional)
     action_tokenizer = None

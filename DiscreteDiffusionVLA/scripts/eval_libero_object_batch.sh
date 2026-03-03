@@ -40,6 +40,8 @@ start_job() {
   CUDA_VISIBLE_DEVICES=$GPU \
     python ../experiments/robot/libero/run_libero_eval.py \
       --pretrained_checkpoint "/path/to/xxx--${STEP}_chkpt" \
+      --sync_model_logic False \
+      --use_checkpoint_defaults True \
       --task_suite_name libero_object \
       --use_l1_regression False \
       --use_diffusion False \
