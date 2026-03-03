@@ -408,7 +408,13 @@ def _evaluate_checkpoint(
 
     n_action_bins = getattr(vla.config, "n_action_bins", 256)
     anchor = getattr(vla.config, "action_vocab_anchor", "pad")
-    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
+    begin_override = getattr(vla.config, "action_token_begin_idx", None)
+    action_tokenizer = ActionTokenizer(
+        processor.tokenizer,
+        bins=n_action_bins,
+        action_vocab_anchor=anchor,
+        action_token_begin_idx=begin_override,
+    )
     unnorm_key = _resolve_unnorm_key(vla, dataset_name)
     action_stats = vla.get_action_stats(unnorm_key)
     mask_token_id = processor.tokenizer.mask_token_id

@@ -9,6 +9,8 @@ from typing import List, Optional, Union
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 
+from prismatic.vla.constants import ACTION_TOKEN_BEGIN_IDX
+
 
 class ActionTokenizer:
     def __init__(
@@ -19,6 +21,7 @@ class ActionTokenizer:
         max_action: int = 1,
         action_vocab_anchor: str = "pad",
         action_token_end_idx: Optional[int] = None,
+        action_token_begin_idx: Optional[int] = None,
     ) -> None:
         """
         Discretizes continuous robot actions into N bins per dimension and maps to the least used tokens.
@@ -41,9 +44,17 @@ class ActionTokenizer:
         self.bins = np.linspace(min_action, max_action, self.n_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-        if action_token_end_idx is not None:
+        if action_token_begin_idx is not None:
+            self.action_token_begin_idx = int(action_token_begin_idx)
+            self.action_token_end_idx = int(self.action_token_begin_idx + self.n_bins)
+        elif action_token_end_idx is not None:
             self.action_token_end_idx = int(action_token_end_idx)
+            self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
         else:
+            if action_vocab_anchor == "legacy":
+                self.action_token_begin_idx = int(ACTION_TOKEN_BEGIN_IDX)
+                self.action_token_end_idx = int(self.action_token_begin_idx + self.n_bins)
+                return
             if action_vocab_anchor == "pad":
                 if self.tokenizer.pad_token_id is None:
                     raise ValueError("tokenizer.pad_token_id must be set when action_vocab_anchor='pad'")
@@ -53,7 +64,7 @@ class ActionTokenizer:
             else:
                 raise ValueError(f"Unknown action_vocab_anchor: {action_vocab_anchor}")
 
-        self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
+            self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
 
     def __call__(self, action: np.ndarray) -> Union[str, List[str]]:
         """Clip & bin actions to *the last `n_bins` tokens* of the action vocabulary range."""

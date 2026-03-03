@@ -85,6 +85,7 @@ class PrismaticConfig(PretrainedConfig):
         pad_token_id: int = 32000,
         mask_token_id: int = 32001,
         action_vocab_anchor: str = "pad",
+        action_token_begin_idx: Optional[int] = None,
         use_mask_token: bool = False,
         use_discrete_diffusion: bool = False,
         use_discrete_flow_matching: bool = False,
@@ -130,6 +131,7 @@ class PrismaticConfig(PretrainedConfig):
         self.pad_token_id, self.pad_to_multiple_of = pad_token_id, pad_to_multiple_of
         self.mask_token_id, self.use_mask_token = mask_token_id, use_mask_token
         self.action_vocab_anchor = action_vocab_anchor
+        self.action_token_begin_idx = action_token_begin_idx
 
         self.use_discrete_diffusion = use_discrete_diffusion
         self.use_discrete_flow_matching = use_discrete_flow_matching

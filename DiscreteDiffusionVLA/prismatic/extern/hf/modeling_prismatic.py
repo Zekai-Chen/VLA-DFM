@@ -36,6 +36,7 @@ from prismatic.training.train_utils import (
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     STOP_INDEX,
@@ -463,7 +464,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if n_bins is None:
             raise ValueError("n_action_bins must be set on config or via bin_centers.")
         n_bins = int(n_bins)
+        begin_override = getattr(self.config, "action_token_begin_idx", None)
+        if begin_override is not None:
+            action_begin = int(begin_override)
+            action_end = int(action_begin + n_bins)
+            return action_begin, action_end, n_bins
+
         anchor = getattr(self.config, "action_vocab_anchor", "pad")
+        if anchor == "legacy":
+            action_begin = int(ACTION_TOKEN_BEGIN_IDX)
+            action_end = int(action_begin + n_bins)
+            return action_begin, action_end, n_bins
         if anchor == "pad":
             action_end = int(self.pad_token_id)
         elif anchor == "vocab_size":
@@ -480,16 +491,14 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         action_begin, action_end, _ = self._action_vocab_range()
         if action_begin < 0:
             raise ValueError(f"Action vocab begin ({action_begin}) is negative; check n_action_bins/pad_token_id.")
-        anchor = getattr(self.config, "action_vocab_anchor", "pad")
-        if anchor == "pad":
-            if action_begin <= self.pad_token_id < action_end:
-                raise ValueError(
-                    f"pad_token_id ({self.pad_token_id}) overlaps action range [{action_begin}, {action_end})."
-                )
-            if action_begin <= self.mask_token_id < action_end:
-                raise ValueError(
-                    f"mask_token_id ({self.mask_token_id}) overlaps action range [{action_begin}, {action_end})."
-                )
+        if action_begin <= self.pad_token_id < action_end:
+            raise ValueError(
+                f"pad_token_id ({self.pad_token_id}) overlaps action range [{action_begin}, {action_end})."
+            )
+        if action_begin <= self.mask_token_id < action_end:
+            raise ValueError(
+                f"mask_token_id ({self.mask_token_id}) overlaps action range [{action_begin}, {action_end})."
+            )
 
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""

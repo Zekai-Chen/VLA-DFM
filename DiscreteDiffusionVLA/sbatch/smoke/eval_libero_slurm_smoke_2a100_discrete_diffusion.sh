@@ -75,6 +75,9 @@ mkdir -p "$LOG_DIR"
 CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-20k--20260302_1306"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
+# Default to legacy action vocab for pre-anchor checkpoints (model not retrained).
+ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -88,6 +91,98 @@ for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 STEPS=(
   20000
 )
+
+# --- Preflight: validate checkpoint config and action vocab range ---
+FIRST_STEP="${STEPS[0]}"
+CKPT_PATH="${CHECKPOINT_ROOT}--${FIRST_STEP}_chkpt"
+if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
+  CKPT_PATH="${CHECKPOINT_ROOT}"
+elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
+  CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
+fi
+export CKPT_PATH
+
+python - <<'PY'
+import json, os, sys
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping config validation.")
+    sys.exit(0)
+cfg_path = os.path.join(ckpt, "config.json")
+if not os.path.exists(cfg_path):
+    print(f"WARNING: config.json not found at {cfg_path}")
+    sys.exit(0)
+cfg = json.load(open(cfg_path))
+print("Checkpoint config summary:")
+for k in [
+    "use_discrete_flow_matching",
+    "use_discrete_diffusion",
+    "use_mask_token",
+    "action_vocab_anchor",
+    "action_token_begin_idx",
+    "n_action_bins",
+]:
+    print(f"  {k}: {cfg.get(k)}")
+PY
+
+python - <<'PY'
+import os
+from transformers import AutoProcessor
+
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping tokenizer validation.")
+    raise SystemExit(0)
+
+try:
+    processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+    tok = processor.tokenizer
+    print("Tokenizer summary:")
+    print("  vocab_size:", tok.vocab_size)
+    print("  vocab_len:", len(tok))
+    print("  pad_token_id:", tok.pad_token_id)
+    print("  mask_token_id:", tok.mask_token_id)
+    if tok.pad_token_id is None or tok.mask_token_id is None:
+        print("WARNING: pad_token_id or mask_token_id is None.")
+    elif tok.pad_token_id >= len(tok) or tok.mask_token_id >= len(tok):
+        print("WARNING: pad/mask token id out of range for len(tokenizer).")
+    cfg = getattr(processor, "config", None)
+except Exception:
+    import json
+    cfg = json.load(open(os.path.join(ckpt, "config.json")))
+    tok = None
+
+def _get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if hasattr(cfg, key):
+        return getattr(cfg, key)
+    return cfg.get(key, default)
+
+anchor = _get(cfg, "action_vocab_anchor", "pad")
+n_bins = _get(cfg, "n_action_bins", 256)
+begin_override = _get(cfg, "action_token_begin_idx", None)
+pad_id = _get(cfg, "pad_token_id", None)
+vocab_len = len(tok) if tok is not None else None
+
+if begin_override is not None:
+    action_begin = int(begin_override)
+    action_end = int(action_begin + int(n_bins))
+elif anchor == "pad" and pad_id is not None:
+    action_end = int(pad_id)
+    action_begin = int(action_end - int(n_bins))
+elif anchor == "vocab_size" and vocab_len is not None:
+    action_end = int(vocab_len)
+    action_begin = int(action_end - int(n_bins))
+else:
+    action_begin = None
+    action_end = None
+
+print("Action vocab summary:")
+print("  anchor:", anchor)
+print("  action_token_begin_idx:", begin_override)
+print("  action_range:", (action_begin, action_end))
+PY
 
 declare -a JOB_PIDS
 for ((i=0; i<TOTAL_SLOTS; i++)); do
@@ -108,6 +203,14 @@ start_job() {
   fi
 
   echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
+  EXTRA_ARGS=()
+  if [[ -n "${ACTION_VOCAB_ANCHOR}" ]]; then
+    EXTRA_ARGS+=(--action_vocab_anchor "${ACTION_VOCAB_ANCHOR}")
+  fi
+  if [[ -n "${ACTION_TOKEN_BEGIN_IDX}" ]]; then
+    EXTRA_ARGS+=(--action_token_begin_idx "${ACTION_TOKEN_BEGIN_IDX}")
+  fi
+
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
       --pretrained_checkpoint "${CKPT_PATH}" \
@@ -125,6 +228,7 @@ start_job() {
       --use_wandb True \
       --wandb_entity "${WANDB_ENTITY}" \
       --wandb_project "${WANDB_PROJECT}" \
+      "${EXTRA_ARGS[@]}" \
     > "$LOG_DIR/eval_${STEP}.log" 2>&1 &
 
   JOB_PIDS[$SLOT]=$!

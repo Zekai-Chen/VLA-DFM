@@ -13,7 +13,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import draccus
 import numpy as np
@@ -57,11 +57,11 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
     NUM_ACTIONS_CHUNK,
     NormalizationType,
     STOP_INDEX,
 )
-from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 
 
 # Define task suite constants
@@ -137,6 +137,10 @@ class GenerateConfig:
     dfm_min_valid_action_frac: float = 0.999         # Fail-fast threshold for in-action fraction
     dfm_max_mask_frac: float = 0.0                   # Fail-fast threshold for final mask fraction
     dfm_max_nan_frac: float = 0.0                    # Fail-fast threshold for NaN action fraction
+
+    # Action vocab overrides (legacy compatibility)
+    action_vocab_anchor: Optional[str] = None        # Override action vocab anchor (pad|vocab_size|legacy)
+    action_token_begin_idx: Optional[int] = None     # Override action token begin index
 
     # Gripper audit
     gripper_audit: bool = False                      # If True, collect per-chunk gripper stats + token hist
@@ -286,6 +290,65 @@ def log_message(message: str, log_file=None):
         log_file.write(message + "\n")
         log_file.flush()
 
+
+def _derive_action_vocab_range(
+    n_action_bins: Optional[int],
+    anchor: Optional[str],
+    pad_token_id: Optional[int],
+    vocab_len: Optional[int],
+    begin_override: Optional[int],
+) -> Tuple[Optional[int], Optional[int]]:
+    if n_action_bins is None:
+        return None, None
+    if begin_override is not None:
+        action_begin = int(begin_override)
+        action_end = int(action_begin + n_action_bins)
+        return action_begin, action_end
+    if anchor == "legacy":
+        action_begin = int(ACTION_TOKEN_BEGIN_IDX)
+        action_end = int(action_begin + n_action_bins)
+        return action_begin, action_end
+    if anchor == "pad":
+        if pad_token_id is None:
+            return None, None
+        action_end = int(pad_token_id)
+        action_begin = int(action_end - n_action_bins)
+        return action_begin, action_end
+    if anchor == "vocab_size":
+        if vocab_len is None:
+            return None, None
+        action_end = int(vocab_len)
+        action_begin = int(action_end - n_action_bins)
+        return action_begin, action_end
+    return None, None
+
+
+def _log_action_vocab_summary(model, processor, log_file=None) -> None:
+    if processor is None:
+        return
+    tok = processor.tokenizer
+    vocab_len = len(tok) if tok is not None else None
+    pad_id = tok.pad_token_id if tok is not None else None
+    mask_id = tok.mask_token_id if tok is not None else None
+    n_action_bins = getattr(model.config, "n_action_bins", None)
+    anchor = getattr(model.config, "action_vocab_anchor", None)
+    begin_override = getattr(model.config, "action_token_begin_idx", None)
+    action_begin, action_end = _derive_action_vocab_range(
+        n_action_bins=n_action_bins,
+        anchor=anchor,
+        pad_token_id=pad_id,
+        vocab_len=vocab_len,
+        begin_override=begin_override,
+    )
+    log_message(
+        f"[action_vocab] vocab_len={vocab_len} pad_token_id={pad_id} mask_token_id={mask_id} "
+        f"n_action_bins={n_action_bins} anchor={anchor} action_token_begin_idx={begin_override}",
+        log_file,
+    )
+    log_message(
+        f"[action_vocab] action_range=[{action_begin}, {action_end})",
+        log_file,
+    )
 
 def _normalize_actions(actions_unnorm: np.ndarray, stats: dict) -> np.ndarray:
     mask = stats.get("mask", np.ones_like(stats["min"], dtype=bool))
@@ -486,10 +549,22 @@ def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, tas
         )
         return
 
+    try:
+        from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+    except Exception as exc:
+        log_message(f"Eval probe import failed ({exc}); skipping probe.", log_file)
+        return
+
     # Build action tokenizer and dataset
     n_action_bins = getattr(model.config, "n_action_bins", 256)
     anchor = getattr(model.config, "action_vocab_anchor", "pad")
-    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
+    begin_override = getattr(model.config, "action_token_begin_idx", None)
+    action_tokenizer = ActionTokenizer(
+        processor.tokenizer,
+        bins=n_action_bins,
+        action_vocab_anchor=anchor,
+        action_token_begin_idx=begin_override,
+    )
     use_wrist_image = cfg.num_images_in_input > 1
     batch_transform = RLDSBatchTransform(
         action_tokenizer,
@@ -998,17 +1073,27 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
-    # Action tokenizer for audits/probes
-    n_action_bins = getattr(model.config, "n_action_bins", 256)
-    anchor = getattr(model.config, "action_vocab_anchor", "pad")
-    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
-    action_stats = model.get_action_stats(cfg.unnorm_key)
-
     # Get expected image dimensions
     resize_size = get_image_resize_size(cfg)
 
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+    _log_action_vocab_summary(model, processor, log_file)
+
+    # Action tokenizer for audits only (probes build their own to keep dependencies optional)
+    action_tokenizer = None
+    action_stats = None
+    if cfg.gripper_audit:
+        n_action_bins = getattr(model.config, "n_action_bins", 256)
+        anchor = getattr(model.config, "action_vocab_anchor", "pad")
+        begin_override = getattr(model.config, "action_token_begin_idx", None)
+        action_tokenizer = ActionTokenizer(
+            processor.tokenizer,
+            bins=n_action_bins,
+            action_vocab_anchor=anchor,
+            action_token_begin_idx=begin_override,
+        )
+        action_stats = model.get_action_stats(cfg.unnorm_key)
     gripper_audit_writer = None
     gripper_audit_state = None
     if cfg.gripper_audit:

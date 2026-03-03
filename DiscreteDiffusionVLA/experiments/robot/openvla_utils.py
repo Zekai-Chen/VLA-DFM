@@ -28,6 +28,7 @@ from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
     STOP_INDEX,
 )
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
@@ -280,9 +281,59 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         update_auto_map(cfg.pretrained_checkpoint)
         check_model_logic_mismatch(cfg.pretrained_checkpoint)
 
+    raw_cfg = {}
+    raw_vla_cfg = {}
+    if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
+        cfg_path = os.path.join(cfg.pretrained_checkpoint, "config.json")
+        if os.path.exists(cfg_path):
+            try:
+                raw_cfg = json.load(open(cfg_path))
+            except Exception:
+                raw_cfg = {}
+    if isinstance(raw_cfg.get("vla"), dict):
+        raw_vla_cfg = raw_cfg.get("vla", {})
+    elif isinstance(raw_cfg, dict):
+        raw_vla_cfg = raw_cfg
+
+    override_anchor = getattr(cfg, "action_vocab_anchor", None)
+    override_begin = getattr(cfg, "action_token_begin_idx", None)
+    if override_anchor is None and override_begin is None and raw_vla_cfg and "action_vocab_anchor" not in raw_vla_cfg:
+        override_anchor = "legacy"
+        raw_begin = raw_vla_cfg.get("action_token_begin_idx")
+        override_begin = int(raw_begin) if raw_begin is not None else ACTION_TOKEN_BEGIN_IDX
+        print(
+            "INFO: action_vocab_anchor missing in checkpoint config.json; "
+            "defaulting to legacy action token range."
+        )
+    if raw_vla_cfg and override_anchor is not None:
+        raw_anchor = raw_vla_cfg.get("action_vocab_anchor")
+        if raw_anchor is not None and raw_anchor != override_anchor:
+            print(
+                f"WARNING: action_vocab_anchor override '{override_anchor}' "
+                f"differs from checkpoint config '{raw_anchor}'."
+            )
+    if raw_vla_cfg and override_begin is not None:
+        raw_begin = raw_vla_cfg.get("action_token_begin_idx")
+        if raw_begin is not None and int(raw_begin) != int(override_begin):
+            print(
+                f"WARNING: action_token_begin_idx override {override_begin} "
+                f"differs from checkpoint config {raw_begin}."
+            )
+    if override_anchor is not None:
+        cfg.action_vocab_anchor = override_anchor
+    if override_begin is not None:
+        cfg.action_token_begin_idx = int(override_begin)
+
+    config = AutoConfig.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
+    if override_anchor is not None:
+        config.action_vocab_anchor = override_anchor
+    if override_begin is not None:
+        config.action_token_begin_idx = int(override_begin)
+
     # Load the model
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
+        config=config,
         # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,

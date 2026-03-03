@@ -1124,10 +1124,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     model_cfg = getattr(vla, "module", vla)
     n_action_bins = getattr(getattr(model_cfg, "config", None), "n_action_bins", None)
     action_vocab_anchor = getattr(getattr(model_cfg, "config", None), "action_vocab_anchor", "pad")
+    action_token_begin_idx = getattr(getattr(model_cfg, "config", None), "action_token_begin_idx", None)
     action_tokenizer = ActionTokenizer(
         processor.tokenizer,
         bins=n_action_bins if n_action_bins is not None else 256,
         action_vocab_anchor=action_vocab_anchor,
+        action_token_begin_idx=action_token_begin_idx,
     )
 
     # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
