@@ -11,6 +11,7 @@ import argparse
 import math
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
@@ -114,6 +115,23 @@ def _stats(arr: np.ndarray) -> Dict[str, float]:
         "std": float(np.std(arr)),
         "clip_frac": float(np.mean((arr <= -1.0) | (arr >= 1.0))),
     }
+
+
+def _stat_value(stats: Dict[str, np.ndarray], key: str, idx: int) -> Optional[float]:
+    arr = stats.get(key)
+    if arr is None:
+        return None
+    arr = np.asarray(arr).reshape(-1)
+    if idx >= arr.shape[0]:
+        return None
+    return float(arr[idx])
+
+
+def _histogram(values: List[int], bins: int) -> Tuple[List[float], List[int]]:
+    if not values:
+        return [], []
+    hist = np.histogram(values, bins=bins)
+    return hist[1].tolist(), hist[0].astype(int).tolist()
 
 
 def _tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
@@ -382,6 +400,8 @@ def _evaluate_checkpoint(
     center_crop: bool,
     use_proprio: bool,
     check_image_parity: bool,
+    log_gripper_hist: bool,
+    gripper_hist_bins: int,
     mask_embed_override: str = "none",
     compute_masked_denoise: bool = True,
     mask_ratios: Optional[List[float]] = None,
@@ -417,6 +437,17 @@ def _evaluate_checkpoint(
     )
     unnorm_key = _resolve_unnorm_key(vla, dataset_name)
     action_stats = vla.get_action_stats(unnorm_key)
+    if log_gripper_hist:
+        gripper_idx = ACTION_DIM - 1
+        gripper_stat = {
+            "min": _stat_value(action_stats, "min", gripper_idx),
+            "max": _stat_value(action_stats, "max", gripper_idx),
+            "mean": _stat_value(action_stats, "mean", gripper_idx),
+            "std": _stat_value(action_stats, "std", gripper_idx),
+            "q01": _stat_value(action_stats, "q01", gripper_idx),
+            "q99": _stat_value(action_stats, "q99", gripper_idx),
+        }
+        print(f"[{label}] dataset_gripper_stats={gripper_stat} (unnorm_key={unnorm_key})")
     mask_token_id = processor.tokenizer.mask_token_id
     pad_token_id = processor.tokenizer.pad_token_id
 
@@ -483,6 +514,14 @@ def _evaluate_checkpoint(
     masked_count = 0
     mask_curve = {}
     gripper_offsets = [ACTION_DIM - 1 + i * ACTION_DIM for i in range(NUM_ACTIONS_CHUNK)]
+    gripper_pred_token_ids: List[int] = []
+    gripper_gt_token_ids: List[int] = []
+    gripper_pred_norm_vals: List[float] = []
+    gripper_gt_norm_vals: List[float] = []
+    gripper_pred_unnorm_vals: List[float] = []
+    gripper_gt_unnorm_vals: List[float] = []
+    gripper_offset_max = max(gripper_offsets) if gripper_offsets else 0
+    gripper_token_warned = False
     if mask_ratios:
         for ratio in mask_ratios:
             mask_curve[ratio] = {
@@ -554,6 +593,23 @@ def _evaluate_checkpoint(
         gt_token_ids = action_tokenizer.encode_actions_to_token_ids(gt_actions_norm)
         pred_token_ids = pred_token_ids.reshape(-1)
         gt_token_ids = gt_token_ids.reshape(-1)
+
+        if log_gripper_hist:
+            pred_actions_norm_r = pred_actions_norm.reshape(-1, ACTION_DIM)
+            gt_actions_norm_r = gt_actions_norm.reshape(-1, ACTION_DIM)
+            pred_actions_unnorm_r = pred_actions_unnorm.reshape(-1, ACTION_DIM)
+            gt_actions_unnorm_r = gt_actions_unnorm.reshape(-1, ACTION_DIM)
+            gripper_pred_norm_vals.extend(pred_actions_norm_r[:, -1].tolist())
+            gripper_gt_norm_vals.extend(gt_actions_norm_r[:, -1].tolist())
+            gripper_pred_unnorm_vals.extend(pred_actions_unnorm_r[:, -1].tolist())
+            gripper_gt_unnorm_vals.extend(gt_actions_unnorm_r[:, -1].tolist())
+
+            if pred_token_ids.shape[0] > gripper_offset_max and gt_token_ids.shape[0] > gripper_offset_max:
+                gripper_pred_token_ids.extend(pred_token_ids[gripper_offsets].tolist())
+                gripper_gt_token_ids.extend(gt_token_ids[gripper_offsets].tolist())
+            elif not gripper_token_warned:
+                gripper_token_warned = True
+                print(f"[{label}] WARNING: gripper token offsets exceed token id length; skipping token hist.")
 
         token_match = (pred_token_ids == gt_token_ids)
         token_match_sum += float(token_match.mean())
@@ -646,6 +702,55 @@ def _evaluate_checkpoint(
             if entry["g_count"] > 0:
                 summary[f"mask_ratio_{ratio}_gripper_ce"] = entry["g_ce_sum"] / entry["g_count"]
                 summary[f"mask_ratio_{ratio}_gripper_acc"] = entry["g_acc_sum"] / entry["g_count"]
+    if log_gripper_hist:
+        def _mean_std(vals: List[float]) -> Tuple[float, float]:
+            if not vals:
+                return float("nan"), float("nan")
+            arr = np.asarray(vals, dtype=np.float32)
+            return float(arr.mean()), float(arr.std())
+
+        pred_norm_mean, pred_norm_std = _mean_std(gripper_pred_norm_vals)
+        gt_norm_mean, gt_norm_std = _mean_std(gripper_gt_norm_vals)
+        pred_unnorm_mean, pred_unnorm_std = _mean_std(gripper_pred_unnorm_vals)
+        gt_unnorm_mean, gt_unnorm_std = _mean_std(gripper_gt_unnorm_vals)
+
+        summary["gripper_pred_norm_mean"] = pred_norm_mean
+        summary["gripper_pred_norm_std"] = pred_norm_std
+        summary["gripper_gt_norm_mean"] = gt_norm_mean
+        summary["gripper_gt_norm_std"] = gt_norm_std
+        summary["gripper_pred_unnorm_mean"] = pred_unnorm_mean
+        summary["gripper_pred_unnorm_std"] = pred_unnorm_std
+        summary["gripper_gt_unnorm_mean"] = gt_unnorm_mean
+        summary["gripper_gt_unnorm_std"] = gt_unnorm_std
+
+        pred_bins, pred_counts = _histogram(gripper_pred_token_ids, gripper_hist_bins)
+        gt_bins, gt_counts = _histogram(gripper_gt_token_ids, gripper_hist_bins)
+        summary["gripper_pred_token_hist_bins"] = pred_bins
+        summary["gripper_pred_token_hist_counts"] = pred_counts
+        summary["gripper_gt_token_hist_bins"] = gt_bins
+        summary["gripper_gt_token_hist_counts"] = gt_counts
+
+        def _quartile_fracs(token_ids: List[int]) -> Tuple[float, float]:
+            if not token_ids:
+                return float("nan"), float("nan")
+            token_ids_arr = np.asarray(token_ids, dtype=np.int64)
+            bin_index = action_tokenizer.action_token_end_idx - token_ids_arr
+            n_bins = int(action_tokenizer.n_bins)
+            low_thresh = int(n_bins * 0.25)
+            high_thresh = int(n_bins * 0.75)
+            return float(np.mean(bin_index <= low_thresh)), float(np.mean(bin_index >= high_thresh))
+
+        pred_low, pred_high = _quartile_fracs(gripper_pred_token_ids)
+        gt_low, gt_high = _quartile_fracs(gripper_gt_token_ids)
+        summary["gripper_pred_token_low_quartile_frac"] = pred_low
+        summary["gripper_pred_token_high_quartile_frac"] = pred_high
+        summary["gripper_gt_token_low_quartile_frac"] = gt_low
+        summary["gripper_gt_token_high_quartile_frac"] = gt_high
+
+        pred_top = Counter(gripper_pred_token_ids).most_common(5) if gripper_pred_token_ids else []
+        gt_top = Counter(gripper_gt_token_ids).most_common(5) if gripper_gt_token_ids else []
+        summary["gripper_pred_token_top5"] = pred_top
+        summary["gripper_gt_token_top5"] = gt_top
     summary["mask_embed_override"] = mask_embed_override
 
     print(f"\n=== {label} Summary ===")
@@ -687,9 +792,12 @@ def main() -> None:
     parser.add_argument("--center_crop", type=str, default="True")
     parser.add_argument("--use_proprio", type=str, default="True")
     parser.add_argument("--check_image_parity", type=str, default="False")
+    parser.add_argument("--log_gripper_hist", type=str, default="True")
+    parser.add_argument("--gripper_hist_bins", type=int, default=16)
     args = parser.parse_args()
 
     check_image_parity = _as_bool(args.check_image_parity)
+    log_gripper_hist = _as_bool(args.log_gripper_hist)
     primary_mode = args.primary_mode.lower()
     if primary_mode not in ("dfm", "dd"):
         raise ValueError(f"Unknown primary_mode: {primary_mode}")
@@ -715,6 +823,8 @@ def main() -> None:
         center_crop=_as_bool(args.center_crop),
         use_proprio=_as_bool(args.use_proprio),
         check_image_parity=check_image_parity,
+        log_gripper_hist=log_gripper_hist,
+        gripper_hist_bins=int(args.gripper_hist_bins),
         mask_embed_override=args.mask_embed_override,
         compute_masked_denoise=(primary_mode == "dfm"),
         mask_ratios=mask_ratios,
@@ -742,6 +852,8 @@ def main() -> None:
             center_crop=_as_bool(args.center_crop),
             use_proprio=_as_bool(args.use_proprio),
             check_image_parity=False,
+            log_gripper_hist=log_gripper_hist,
+            gripper_hist_bins=int(args.gripper_hist_bins),
             mask_ratios=mask_ratios,
         )
 

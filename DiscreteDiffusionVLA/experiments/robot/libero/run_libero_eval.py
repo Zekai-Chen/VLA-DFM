@@ -91,6 +91,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 _GRIPPER_DEBUG_WARNED = False
+_GRIPPER_OVERRIDE_WARNED = False
 
 
 @dataclass
@@ -149,6 +150,9 @@ class GenerateConfig:
     # Gripper audit
     gripper_audit: bool = False                      # If True, collect per-chunk gripper stats + token hist
     gripper_debug_raw: bool = False                  # If True, bypass gripper postprocess for sanity runs
+    gripper_trace: bool = False                      # If True, log gripper postprocess trace
+    force_gripper_value: Optional[float] = None      # If set, force gripper value (env action space)
+    force_gripper_steps: int = 0                     # Number of env steps to force gripper value
     debug_log_all_metrics: bool = True               # If True, emit full debug payloads into eval log
     debug_log_every: int = 1                         # Emit debug payload every N chunks (1 = every)
 
@@ -401,6 +405,9 @@ def _log_eval_banner(cfg: GenerateConfig, log_file=None) -> None:
         f"sync_model_logic={cfg.sync_model_logic} "
         f"use_checkpoint_defaults={getattr(cfg, 'use_checkpoint_defaults', True)} "
         f"gripper_debug_raw={cfg.gripper_debug_raw} "
+        f"gripper_trace={cfg.gripper_trace} "
+        f"force_gripper_value={cfg.force_gripper_value} "
+        f"force_gripper_steps={cfg.force_gripper_steps} "
         f"gripper_audit={cfg.gripper_audit} "
         f"debug_log_all_metrics={cfg.debug_log_all_metrics} "
         f"debug_log_every={cfg.debug_log_every} "
@@ -426,6 +433,20 @@ def _to_jsonable(obj):
 def _emit_debug_payload(payload: dict, log_file=None) -> None:
     payload = _to_jsonable(payload)
     log_message(f"[debug] {json.dumps(payload, separators=(',', ':'))}", log_file)
+
+
+def _gripper_trace_for_action(action: np.ndarray, model_family: str) -> dict:
+    gripper_pre_norm = float(action[-1])
+    gripper_after_norm = 2 * (gripper_pre_norm - 0.0) / (1.0 - 0.0) - 1.0
+    gripper_after_binarize = float(np.sign(gripper_after_norm))
+    gripper_after_invert = -gripper_after_binarize if model_family == "openvla" else gripper_after_binarize
+    return {
+        "gripper_pre_norm": gripper_pre_norm,
+        "gripper_after_norm": gripper_after_norm,
+        "gripper_after_binarize": gripper_after_binarize,
+        "gripper_after_invert": gripper_after_invert,
+        "gripper_post": gripper_after_invert,
+    }
 
 
 def _compute_action_stats(arr: np.ndarray) -> dict:
@@ -816,6 +837,7 @@ def run_episode(
     log_file=None,
 ):
     """Run a single episode in the environment."""
+    global _GRIPPER_OVERRIDE_WARNED
     # Reset environment
     env.reset()
 
@@ -1030,6 +1052,19 @@ def run_episode(
                         "gripper_debug_raw": cfg.gripper_debug_raw,
                     }
 
+                    force_enabled = (cfg.force_gripper_value is not None) and (cfg.force_gripper_steps > 0)
+                    payload["gripper_force"] = {
+                        "enabled": force_enabled,
+                        "value": cfg.force_gripper_value,
+                        "steps": cfg.force_gripper_steps,
+                        "active": bool(force_enabled and (t < cfg.force_gripper_steps)),
+                    }
+
+                    if cfg.gripper_trace and (not cfg.gripper_debug_raw) and actions_np.size > 0:
+                        payload["gripper_trace"] = [
+                            _gripper_trace_for_action(a, cfg.model_family) for a in actions_np
+                        ]
+
                     if debug is not None:
                         payload["model_debug"] = debug
 
@@ -1083,6 +1118,17 @@ def run_episode(
 
             # Process action
             action = process_action(action, cfg.model_family, cfg.gripper_debug_raw)
+
+            if cfg.force_gripper_value is not None and cfg.force_gripper_steps > 0 and t < cfg.force_gripper_steps:
+                if not _GRIPPER_OVERRIDE_WARNED:
+                    _GRIPPER_OVERRIDE_WARNED = True
+                    log_message(
+                        f"[gripper_override] forcing gripper={cfg.force_gripper_value} "
+                        f"for first {cfg.force_gripper_steps} env steps",
+                        log_file,
+                    )
+                action = action.copy()
+                action[-1] = float(cfg.force_gripper_value)
 
             # Execute action in environment
             obs, reward, done, info = env.step(action.tolist())

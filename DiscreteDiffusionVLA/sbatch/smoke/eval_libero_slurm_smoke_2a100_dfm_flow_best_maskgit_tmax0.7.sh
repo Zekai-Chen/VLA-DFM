@@ -90,6 +90,9 @@ SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
 # Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
+GRIPPER_TRACE=${GRIPPER_TRACE:-False}
+FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
+FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
 DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
@@ -218,6 +221,11 @@ start_job() {
     CKPT_PATH="${CHECKPOINT_ROOT}/${STEP}_chkpt"
   fi
 
+  local EXTRA_ARGS=()
+  if [[ -n "${FORCE_GRIPPER_VALUE}" ]]; then
+    EXTRA_ARGS+=(--force_gripper_value "${FORCE_GRIPPER_VALUE}")
+  fi
+
   echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
@@ -225,6 +233,9 @@ start_job() {
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --gripper_trace ${GRIPPER_TRACE} \
+      --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
+      "${EXTRA_ARGS[@]}" \
       --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
       --debug_log_every ${DEBUG_LOG_EVERY} \
       --gripper_audit ${GRIPPER_AUDIT} \
