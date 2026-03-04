@@ -10,3 +10,9 @@ docs/
 
 # Local logs
 log4_trying_to_rep_log3/
+
+# Local model artifacts/cache
+20k_DD_Legacy_Model/
+local_model_cache2
+local_model_cache2_dir/
+z2.md
