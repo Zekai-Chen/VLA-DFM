@@ -83,18 +83,18 @@ SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
-# Legacy DD behavior (prompt/tokenization/masks); auto-enforced in code for DD
-# Set LEGACY_TRAIN_MODE empty to rely on defaults
+# Legacy DD behavior (prompt/tokenization/masks); keep explicit for this script
 LEGACY_TRAIN_MODE=${LEGACY_TRAIN_MODE:-"True"}
+if [[ "${LEGACY_TRAIN_MODE}" != "True" ]]; then
+  echo "ERROR: LEGACY_TRAIN_MODE must be 'True' for legacy DD align test." 1>&2
+  exit 1
+fi
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
 
 
 # --- Launch (PyTorch DDP) ---
-LEGACY_ARGS=()
-if [[ -n "${LEGACY_TRAIN_MODE}" ]]; then
-  LEGACY_ARGS=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
-fi
+LEGACY_ARGS=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
 torchrun --standalone --nnodes 1 --nproc-per-node ${NPROC} vla-scripts/finetune.py \
   --vla_path "${VLA_PATH}" \
   --data_root_dir "${DATA_ROOT}" \
@@ -120,5 +120,5 @@ torchrun --standalone --nnodes 1 --nproc-per-node ${NPROC} vla-scripts/finetune.
   "${LEGACY_ARGS[@]}" \
   --wandb_entity "a10v-1" \
   --wandb_project "VLA-DFM" \
-  --run_id_note "smoke-2xA100-dd-3k-align--$(date +%Y%m%d_%H%M)" \
+  --run_id_note "smoke-2xA100-dd-legacy-3k-align--$(date +%Y%m%d_%H%M)" \
   | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
