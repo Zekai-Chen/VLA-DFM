@@ -84,6 +84,7 @@ class FinetuneConfig:
 
     use_discrete_diffusion: bool = True             # If True, uses discrete diffusion (instead of continuous) for action generation
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching for action generation
+    legacy_train_mode: bool = False                 # If True, use legacy prompt/tokenization/masks (discrete diffusion only)
 
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
@@ -414,12 +415,16 @@ def run_forward_pass(
     if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
-    current_action_mask = get_current_action_mask(
-        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
-    )
-    next_actions_mask = get_next_actions_mask(
-        ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
-    )
+    if cfg.legacy_train_mode:
+        current_action_mask = get_current_action_mask(ground_truth_token_ids)
+        next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+    else:
+        current_action_mask = get_current_action_mask(
+            ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+        )
+        next_actions_mask = get_next_actions_mask(
+            ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+        )
 
     # Compute metrics for discrete action representation (next-token prediction)
     if not (use_l1_regression or use_diffusion):
@@ -485,12 +490,16 @@ def run_forward_pass(
         if use_discrete_diffusion:
             # reset action mask to get correct hidden states for action portion
             ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-            current_action_mask = get_current_action_mask(
-                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
-            )
-            next_actions_mask = get_next_actions_mask(
-                ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
-            )
+            if cfg.legacy_train_mode:
+                current_action_mask = get_current_action_mask(ground_truth_token_ids)
+                next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+            else:
+                current_action_mask = get_current_action_mask(
+                    ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+                )
+                next_actions_mask = get_next_actions_mask(
+                    ground_truth_token_ids, action_tokenizer.action_token_begin_idx, action_tokenizer.action_token_end_idx
+                )
 
         actions_hidden_states = (
             text_hidden_states[current_action_mask | next_actions_mask]
@@ -915,6 +924,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_discrete_flow_matching and (cfg.use_l1_regression or cfg.use_diffusion)), (
         "DFM is not compatible with continuous action heads (L1 regression or diffusion)."
     )
+    if cfg.legacy_train_mode and not cfg.use_discrete_diffusion:
+        raise ValueError("legacy_train_mode is only supported when use_discrete_diffusion=True.")
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
@@ -946,6 +957,8 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"\tPROPRIO_DIM: {PROPRIO_DIM}\n"
         f"\tACTION_PROPRIO_NORMALIZATION_TYPE: {ACTION_PROPRIO_NORMALIZATION_TYPE}"
     )
+    if cfg.legacy_train_mode:
+        print("[legacy_train] enabled: using legacy prompt/tokenization/masks")
 
     # Two options:
     # (1) Base model is on Hugging Face Hub
@@ -992,6 +1005,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig as LocalOpenVLAConfig
 
         model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
+
+    if cfg.legacy_train_mode:
+        model_config.legacy_eval_mode = True
+        model_config.legacy_train_mode = True
 
     _apply_finetune_cfg_to_model_config(cfg, model_config, processor)
 
@@ -1125,12 +1142,20 @@ def finetune(cfg: FinetuneConfig) -> None:
     n_action_bins = getattr(getattr(model_cfg, "config", None), "n_action_bins", None)
     action_vocab_anchor = getattr(getattr(model_cfg, "config", None), "action_vocab_anchor", "pad")
     action_token_begin_idx = getattr(getattr(model_cfg, "config", None), "action_token_begin_idx", None)
-    action_tokenizer = ActionTokenizer(
-        processor.tokenizer,
-        bins=n_action_bins if n_action_bins is not None else 256,
-        action_vocab_anchor=action_vocab_anchor,
-        action_token_begin_idx=action_token_begin_idx,
-    )
+    if cfg.legacy_train_mode:
+        action_tokenizer = ActionTokenizer(
+            processor.tokenizer,
+            bins=n_action_bins if n_action_bins is not None else 256,
+            action_vocab_anchor="vocab_size",
+            legacy_bins=True,
+        )
+    else:
+        action_tokenizer = ActionTokenizer(
+            processor.tokenizer,
+            bins=n_action_bins if n_action_bins is not None else 256,
+            action_vocab_anchor=action_vocab_anchor,
+            action_token_begin_idx=action_token_begin_idx,
+        )
 
     # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
     #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.
@@ -1159,6 +1184,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         prompt_builder_fn=PurePromptBuilder,
         use_wrist_image=use_wrist_image,
         use_proprio=cfg.use_proprio,
+        legacy_mode=cfg.legacy_train_mode,
     )
     train_dataset = RLDSDataset(
         cfg.data_root_dir,
