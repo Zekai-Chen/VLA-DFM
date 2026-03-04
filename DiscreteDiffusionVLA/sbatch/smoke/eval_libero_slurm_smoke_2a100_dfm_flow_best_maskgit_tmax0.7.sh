@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:1
 #SBATCH --nodes=1
-#SBATCH --mem=120G
+#SBATCH --mem=60G
 #SBATCH --time=47:00:00
 #SBATCH --job-name=openvla-eval-dfm-maskgit-tmax0.7
 #SBATCH --output=logs/openvla_eval_dfm_maskgit_tmax0.7_%j.out
@@ -76,16 +76,26 @@ CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-sm
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
-DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-1}
+DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
-DFM_NUM_STEPS=${DFM_NUM_STEPS:-12}
-DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-12}
-DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-cosine}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-0}
+DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-0}
+DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-auto}
 DFM_TEMPERATURE=${DFM_TEMPERATURE:-0.0}
-DFM_SCHEDULE=${DFM_SCHEDULE:-}
+DFM_SCHEDULE=${DFM_SCHEDULE:-auto}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
 DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
-NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-1}
+NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
+USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+# Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
+GRIPPER_TRACE=${GRIPPER_TRACE:-False}
+FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
+FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
+DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
+DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
+GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -95,37 +105,19 @@ TOTAL_SLOTS=$((NUM_GPUS * MAX_PER_GPU))
 GPUS=()
 for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 
-# Evaluate a small set of checkpoints
+# Single-checkpoint eval (no step subfolders)
 STEPS=(
-  3000
+  final
 )
 
 # --- Preflight: validate checkpoint config matches DFM eval expectations ---
 FIRST_STEP="${STEPS[0]}"
-CKPT_PATH="${CHECKPOINT_ROOT}--${FIRST_STEP}_chkpt"
-if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
-  CKPT_PATH="${CHECKPOINT_ROOT}"
-elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
-  CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
+CKPT_PATH="${CHECKPOINT_ROOT}"
+if [[ ! -d "${CKPT_PATH}" || ! -f "${CKPT_PATH}/config.json" ]]; then
+  echo "ERROR: Expected a single checkpoint directory with config.json at ${CKPT_PATH}" 1>&2
+  exit 1
 fi
 export CKPT_PATH
-
-if [[ -z "${DFM_SCHEDULE}" ]]; then
-  DFM_SCHEDULE=$(python - <<'PY'
-import json, os
-ckpt = os.environ.get("CKPT_PATH")
-if not ckpt:
-    print("cosine")
-    raise SystemExit(0)
-cfg_path = os.path.join(ckpt, "config.json")
-if not os.path.exists(cfg_path):
-    print("cosine")
-    raise SystemExit(0)
-cfg = json.load(open(cfg_path))
-print(cfg.get("dfm_schedule", "cosine"))
-PY
-)
-fi
 
 python - <<'PY'
 import json, os, sys
@@ -221,17 +213,26 @@ start_job() {
   local GPU_INDEX=$(( SLOT / MAX_PER_GPU ))
   local GPU=${GPUS[$GPU_INDEX]}
 
-  local CKPT_PATH="${CHECKPOINT_ROOT}--${STEP}_chkpt"
-  if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
-    CKPT_PATH="${CHECKPOINT_ROOT}"
-  elif [[ -d "${CHECKPOINT_ROOT}/${STEP}_chkpt" ]]; then
-    CKPT_PATH="${CHECKPOINT_ROOT}/${STEP}_chkpt"
+  local CKPT_PATH="${CHECKPOINT_ROOT}"
+
+  local EXTRA_ARGS=()
+  if [[ -n "${FORCE_GRIPPER_VALUE}" ]]; then
+    EXTRA_ARGS+=(--force_gripper_value "${FORCE_GRIPPER_VALUE}")
   fi
 
   echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
       --pretrained_checkpoint "${CKPT_PATH}" \
+      --sync_model_logic ${SYNC_MODEL_LOGIC} \
+      --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --gripper_trace ${GRIPPER_TRACE} \
+      --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
+      "${EXTRA_ARGS[@]}" \
+      --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+      --debug_log_every ${DEBUG_LOG_EVERY} \
+      --gripper_audit ${GRIPPER_AUDIT} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

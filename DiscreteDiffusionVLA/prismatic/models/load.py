@@ -211,13 +211,16 @@ def load_vla(
     if isinstance(model_cfg, dict):
         n_action_bins = model_cfg.get("n_action_bins")
         action_vocab_anchor = model_cfg.get("action_vocab_anchor", "pad")
+        action_token_begin_idx = model_cfg.get("action_token_begin_idx")
     else:
         n_action_bins = getattr(model_cfg, "n_action_bins", None)
         action_vocab_anchor = getattr(model_cfg, "action_vocab_anchor", "pad")
+        action_token_begin_idx = getattr(model_cfg, "action_token_begin_idx", None)
     action_tokenizer = ActionTokenizer(
         llm_backbone.get_tokenizer(),
         bins=n_action_bins if n_action_bins is not None else 256,
         action_vocab_anchor=action_vocab_anchor,
+        action_token_begin_idx=action_token_begin_idx,
     )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)

@@ -24,12 +24,15 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.action_vocab import resolve_action_vocab
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
     STOP_INDEX,
 )
+from prismatic.vla.prompt_utils import build_vla_prompt as _build_vla_prompt
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
 # Apply JSON numpy patch for serialization
@@ -200,6 +203,35 @@ def check_model_logic_mismatch(pretrained_checkpoint: str) -> None:
         _handle_file_sync(curr_filepath, checkpoint_filepath, filename)
 
 
+def ensure_checkpoint_model_logic_files(pretrained_checkpoint: str) -> None:
+    """
+    Ensure model logic files exist in checkpoint without overwriting existing files.
+
+    For backward compatibility, if required files are missing in the checkpoint, copy
+    the current repo versions with a warning.
+    """
+    if not os.path.isdir(pretrained_checkpoint):
+        return
+
+    required_files = {"modeling_prismatic.py": None, "configuration_prismatic.py": None}
+    for root, _, files in os.walk("./prismatic/"):
+        for filename in required_files.keys():
+            if filename in files and required_files[filename] is None:
+                required_files[filename] = os.path.join(root, filename)
+
+    for filename, curr_filepath in required_files.items():
+        if curr_filepath is None:
+            print(f"WARNING: `{filename}` is not found anywhere in the current directory.")
+            continue
+
+        checkpoint_filepath = os.path.join(pretrained_checkpoint, filename)
+        if not os.path.exists(checkpoint_filepath) or os.path.getsize(checkpoint_filepath) == 0:
+            print(
+                f"WARNING: {filename} missing in checkpoint. "
+                "Copying current repo version for compatibility."
+            )
+            shutil.copy2(curr_filepath, checkpoint_filepath)
+
 def find_checkpoint_file(pretrained_checkpoint: str, file_pattern: str) -> str:
     """
     Find a specific checkpoint file matching a pattern.
@@ -276,13 +308,97 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
         AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-        # Update config.json and sync model files
-        update_auto_map(cfg.pretrained_checkpoint)
-        check_model_logic_mismatch(cfg.pretrained_checkpoint)
+        # Update config.json and sync model files (opt-in)
+        if getattr(cfg, "sync_model_logic", False):
+            update_auto_map(cfg.pretrained_checkpoint)
+            check_model_logic_mismatch(cfg.pretrained_checkpoint)
+        else:
+            ensure_checkpoint_model_logic_files(cfg.pretrained_checkpoint)
+
+    raw_cfg = {}
+    raw_vla_cfg = {}
+    if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
+        cfg_path = os.path.join(cfg.pretrained_checkpoint, "config.json")
+        if os.path.exists(cfg_path):
+            try:
+                raw_cfg = json.load(open(cfg_path))
+            except Exception:
+                raw_cfg = {}
+    if isinstance(raw_cfg.get("vla"), dict):
+        raw_vla_cfg = raw_cfg.get("vla", {})
+    elif isinstance(raw_cfg, dict):
+        raw_vla_cfg = raw_cfg
+
+    user_anchor = getattr(cfg, "action_vocab_anchor", None)
+    user_begin = getattr(cfg, "action_token_begin_idx", None)
+    legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
+
+    # Auto-enable legacy eval if checkpoint was trained in legacy mode.
+    if not legacy_eval_mode and raw_vla_cfg:
+        if raw_vla_cfg.get("legacy_train_mode") or raw_vla_cfg.get("legacy_eval_mode"):
+            legacy_eval_mode = True
+            cfg.legacy_eval_mode = True
+            print("[legacy_eval] enabling legacy_eval_mode from checkpoint config")
+
+    override_anchor = user_anchor
+    override_begin = user_begin
+
+    if legacy_eval_mode:
+        if override_anchor is None and override_begin is None:
+            override_anchor = "legacy"
+            override_begin = int(ACTION_TOKEN_BEGIN_IDX)
+            print("[legacy_eval] forcing action_vocab_anchor='legacy'")
+        if override_begin is None and raw_vla_cfg and "action_token_begin_idx" in raw_vla_cfg:
+            print(
+                "[legacy_eval] ignoring checkpoint action_token_begin_idx; "
+                "use --action_token_begin_idx to override explicitly."
+            )
+    elif override_anchor is None and override_begin is None and raw_vla_cfg and "action_vocab_anchor" not in raw_vla_cfg:
+        override_anchor = "legacy"
+        raw_begin = raw_vla_cfg.get("action_token_begin_idx")
+        override_begin = int(raw_begin) if raw_begin is not None else ACTION_TOKEN_BEGIN_IDX
+        print(
+            "INFO: action_vocab_anchor missing in checkpoint config.json; "
+            f"defaulting to {override_anchor} action token range."
+        )
+    if raw_vla_cfg and override_anchor is not None:
+        raw_anchor = raw_vla_cfg.get("action_vocab_anchor")
+        if raw_anchor is not None and raw_anchor != override_anchor:
+            print(
+                f"WARNING: action_vocab_anchor override '{override_anchor}' "
+                f"differs from checkpoint config '{raw_anchor}'."
+            )
+    if raw_vla_cfg and override_begin is not None:
+        raw_begin = raw_vla_cfg.get("action_token_begin_idx")
+        if raw_begin is not None and int(raw_begin) != int(override_begin):
+            print(
+                f"WARNING: action_token_begin_idx override {override_begin} "
+                f"differs from checkpoint config {raw_begin}."
+            )
+    if override_anchor is not None:
+        cfg.action_vocab_anchor = override_anchor
+    if override_begin is not None:
+        cfg.action_token_begin_idx = int(override_begin)
+
+    config = AutoConfig.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
+    config.legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
+    auto_map = getattr(config, "auto_map", None)
+    if auto_map is None or "AutoConfig" not in auto_map or "AutoModelForVision2Seq" not in auto_map:
+        config.auto_map = {
+            "AutoConfig": "configuration_prismatic.OpenVLAConfig",
+            "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
+        }
+    if override_anchor is not None:
+        config.action_vocab_anchor = override_anchor
+    if override_begin is not None:
+        config.action_token_begin_idx = int(override_begin)
+    elif legacy_eval_mode and hasattr(config, "action_token_begin_idx"):
+        config.action_token_begin_idx = None
 
     # Load the model
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
+        config=config,
         # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
@@ -291,9 +407,78 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         trust_remote_code=True,
     )
 
+    # Legacy eval: override action binning to match older checkpoints (n_bins edges, vocab-anchored).
+    if getattr(cfg, "legacy_eval_mode", False):
+        n_bins = getattr(vla.config, "n_action_bins", None)
+        if n_bins is None:
+            bins = getattr(vla, "bins", None)
+            centers = getattr(vla, "bin_centers", None)
+            if bins is not None:
+                bins_len = int(len(bins))
+                if centers is not None:
+                    centers_len = int(len(centers))
+                    if bins_len == centers_len + 1:
+                        n_bins = centers_len
+                    elif bins_len == centers_len:
+                        n_bins = bins_len
+                    else:
+                        n_bins = bins_len
+                else:
+                    n_bins = bins_len
+            elif centers is not None:
+                n_bins = int(len(centers))
+        if n_bins is not None:
+            n_bins = int(n_bins)
+            vla.bins = np.linspace(-1, 1, n_bins)
+            vla.bin_centers = (vla.bins[:-1] + vla.bins[1:]) / 2.0
+            print("[legacy_eval] using legacy action binning (n_bins edges)")
+        else:
+            print("[legacy_eval] WARNING: n_action_bins missing; cannot apply legacy binning override.")
+
+    # Log logic fingerprints + file paths for debugging
+    try:
+        import inspect
+        import importlib
+
+        model_mod = importlib.import_module(vla.__class__.__module__)
+        model_rev = getattr(model_mod, "MODEL_LOGIC_REV", "unknown")
+        print(f"[logic] MODEL_LOGIC_REV={model_rev}")
+        print(f"[logic] model_class_file={inspect.getfile(vla.__class__)}")
+        try:
+            from prismatic.discrete_flow import dfm_decode as dfm_decode_module
+
+            dfm_rev = getattr(dfm_decode_module, "DFM_DECODE_REV", "unknown")
+            print(f"[logic] DFM_DECODE_REV={dfm_rev}")
+            print(f"[logic] dfm_decode_file={inspect.getfile(dfm_decode_module)}")
+        except Exception as exc:
+            print(f"[logic] DFM decode fingerprint unavailable: {exc}")
+    except Exception as exc:
+        print(f"[logic] Logic fingerprint unavailable: {exc}")
+
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
     if cfg.use_film:
         vla = _apply_film_to_vla(vla, cfg)
+
+    # Log effective action vocab configuration
+    n_action_bins = getattr(vla.config, "n_action_bins", None)
+    action_vocab_anchor = getattr(vla.config, "action_vocab_anchor", None)
+    action_token_begin_idx = getattr(vla.config, "action_token_begin_idx", None)
+    pad_token_id = getattr(vla.config, "pad_token_id", None)
+    print(
+        "[action_vocab] "
+        f"n_action_bins={n_action_bins} "
+        f"anchor={action_vocab_anchor} "
+        f"action_token_begin_idx={action_token_begin_idx} "
+        f"pad_token_id={pad_token_id}"
+    )
+    action_begin, action_end, _ = vla._action_vocab_range()
+    print(f"[action_vocab] action_range=[{action_begin}, {action_end})")
+    if getattr(cfg, "legacy_eval_mode", False):
+        print(
+            "[legacy_eval] "
+            f"effective_action_range=[{action_begin}, {action_end}) "
+            f"anchor={action_vocab_anchor}"
+        )
 
     # Set number of images in model input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
@@ -392,7 +577,7 @@ def get_processor(cfg: Any) -> AutoProcessor:
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
 
 
-def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> None:
+def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer, require_mask_token: bool = True) -> None:
     """Ensure tokenizer and model embeddings are aligned (fail fast on mismatches)."""
     vocab_len = len(tokenizer)
     emb_n = model.get_input_embeddings().num_embeddings
@@ -415,14 +600,19 @@ def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> Non
     if out_n is not None and out_n != emb_n:
         raise RuntimeError(f"Output embeddings != input embeddings: emb={emb_n}, out={out_n}")
 
-    if tokenizer.pad_token_id is None or tokenizer.mask_token_id is None:
+    if tokenizer.pad_token_id is None:
+        raise RuntimeError(f"Tokenizer missing pad token: pad_token_id={tokenizer.pad_token_id}")
+    if tokenizer.pad_token_id >= vocab_len:
         raise RuntimeError(
-            f"Tokenizer missing special tokens: pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
+            f"Special token id out of range: len(tokenizer)={vocab_len}, pad_token_id={tokenizer.pad_token_id}"
         )
-    if tokenizer.pad_token_id >= vocab_len or tokenizer.mask_token_id >= vocab_len:
-        raise RuntimeError(
-            f"Special token ids out of range: len(tokenizer)={vocab_len}, pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
-        )
+    if require_mask_token:
+        if tokenizer.mask_token_id is None:
+            raise RuntimeError(f"Tokenizer missing mask token: mask_token_id={tokenizer.mask_token_id}")
+        if tokenizer.mask_token_id >= vocab_len:
+            raise RuntimeError(
+                f"Special token id out of range: len(tokenizer)={vocab_len}, mask_token_id={tokenizer.mask_token_id}"
+            )
 
 
 def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioProjector:
@@ -797,9 +987,55 @@ def get_vla_action(
     """
     with torch.inference_mode():
         debug = None
+        legacy_mode = getattr(cfg, "legacy_eval_mode", False)
+        if use_discrete_flow_matching:
+            n_bins = int(getattr(vla.config, "n_action_bins", 256))
+            anchor = getattr(vla.config, "action_vocab_anchor", "pad")
+            begin_override = getattr(vla.config, "action_token_begin_idx", None)
+            tokenizer_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor, begin_override)
+            model_begin, model_end, _ = vla._action_vocab_range()
+            print(
+                "[dfm_vocab_eval] "
+                f"anchor={anchor} begin={tokenizer_range.begin} end={tokenizer_range.end} "
+                f"pad_id={tokenizer_range.pad_token_id} vocab_size={tokenizer_range.vocab_size}"
+            )
+            print(
+                "[dfm_vocab_eval] "
+                f"model_range=[{model_begin}, {model_end}) "
+                f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+            )
+            if model_begin != tokenizer_range.begin or model_end != tokenizer_range.end:
+                raise RuntimeError(
+                    "DFM action vocab mismatch: "
+                    f"model_range=[{model_begin}, {model_end}) "
+                    f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+                )
+            # Build tokenizer to validate derived begin/end matches action tokenizer expectation.
+            action_tokenizer = ActionTokenizer(
+                processor.tokenizer,
+                bins=n_bins,
+                action_vocab_anchor=anchor,
+                action_token_begin_idx=begin_override,
+            )
+            if action_tokenizer.action_token_begin_idx != tokenizer_range.begin:
+                raise RuntimeError(
+                    "DFM action vocab mismatch: "
+                    f"tokenizer_begin={action_tokenizer.action_token_begin_idx} "
+                    f"config_begin={tokenizer_range.begin}"
+                )
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
-            raise RuntimeError("mask_token_id missing in tokenizer — checkpoint tokenizer is incompatible with DFM.")
+            if legacy_mode:
+                processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+                if hasattr(vla, "config") and hasattr(vla.config, "set_mask_token_id"):
+                    vla.config.set_mask_token_id(processor.tokenizer.mask_token_id)
+                if hasattr(vla, "mask_token_id"):
+                    vla.mask_token_id = processor.tokenizer.mask_token_id
+                if hasattr(vla, "config") and hasattr(vla.config, "use_mask_token"):
+                    vla.config.use_mask_token = True
+                print("[legacy_eval] added missing mask token to tokenizer/config for eval compatibility.")
+            else:
+                raise RuntimeError("mask_token_id missing in tokenizer — checkpoint tokenizer is incompatible with DFM.")
         was_dfm_trained = getattr(vla.config, "use_discrete_flow_matching", False) if hasattr(vla, "config") else False
         if use_discrete_flow_matching and hasattr(vla, "config") and hasattr(vla.config, "use_discrete_flow_matching"):
             vla.config.use_discrete_flow_matching = True
@@ -823,24 +1059,21 @@ def get_vla_action(
         primary_image = all_images.pop(0)
 
         # Build VLA prompt to mirror training-time formatting
-        prompt_builder = PurePromptBuilder("openvla")
-        prompt_builder.add_turn("human", f"What action should the robot take to {task_label.lower()}?")
-        prompt_builder.add_turn("gpt", "")
-        prompt = prompt_builder.get_prompt()
-        # Training drops the terminal EOS; keep the trailing space before it.
-        if prompt.endswith("</s>"):
-            prompt = prompt[: -len("</s>")]
+        prompt = _build_vla_prompt(task_label, legacy=legacy_mode)
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
-        inputs = _strip_eos_from_inputs(inputs)
+        if not legacy_mode:
+            inputs = _strip_eos_from_inputs(inputs)
 
         # Process additional wrist images if any
         if all_images:
             all_wrist_inputs = [
-                _strip_eos_from_inputs(processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16))
+                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16)
                 for image_wrist in all_images
             ]
+            if not legacy_mode:
+                all_wrist_inputs = [_strip_eos_from_inputs(wrist) for wrist in all_wrist_inputs]
             # Concatenate all images
             primary_pixel_values = inputs["pixel_values"]
             all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
@@ -865,16 +1098,22 @@ def get_vla_action(
         if clamp_values is not None and isinstance(clamp_mask, bool) and not clamp_mask:
             clamp_mask = True
 
-        # Prefer checkpoint schedule when not explicitly set
-        dfm_schedule = getattr(cfg, "dfm_schedule", None)
-        if dfm_schedule in (None, "", "auto"):
-            dfm_schedule = getattr(getattr(vla, "config", None), "dfm_schedule", "cosine")
-        dfm_maskgit_num_steps = getattr(cfg, "dfm_maskgit_num_steps", None)
-        if dfm_maskgit_num_steps in (None, 0):
-            dfm_maskgit_num_steps = getattr(getattr(vla, "config", None), "dfm_maskgit_num_steps", 12)
-        dfm_maskgit_schedule = getattr(cfg, "dfm_maskgit_schedule", None)
-        if dfm_maskgit_schedule in (None, "", "auto"):
-            dfm_maskgit_schedule = getattr(getattr(vla, "config", None), "dfm_maskgit_schedule", "cosine")
+        def _resolve_cfg_value(name: str, empty_values: tuple, default: Any) -> Any:
+            value = getattr(cfg, name, None)
+            if value in empty_values:
+                if getattr(cfg, "use_checkpoint_defaults", True):
+                    value = getattr(getattr(vla, "config", None), name, default)
+                else:
+                    value = default
+            return value
+
+        dfm_schedule = _resolve_cfg_value("dfm_schedule", (None, "", "auto"), "cosine")
+        dfm_maskgit_num_steps = _resolve_cfg_value("dfm_maskgit_num_steps", (None, 0), 12)
+        dfm_maskgit_schedule = _resolve_cfg_value("dfm_maskgit_schedule", (None, "", "auto"), "cosine")
+        dfm_num_steps = _resolve_cfg_value("dfm_num_steps", (None, 0), 12)
+        dfm_time_eps = _resolve_cfg_value("dfm_time_eps", (None, -1, -1.0), 1e-3)
+        dfm_step_min = _resolve_cfg_value("dfm_step_min", (None, -1, -1.0), 1e-4)
+        dfm_step_max = _resolve_cfg_value("dfm_step_max", (None, -1, -1.0), 0.2)
 
         # Generate action
         if action_head is None:
@@ -891,16 +1130,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -951,16 +1190,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
                     dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -984,16 +1223,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),
@@ -1017,16 +1256,16 @@ def get_vla_action(
                     use_film=use_film,
                     use_discrete_diffusion=use_discrete_diffusion,
                     use_discrete_flow_matching=use_discrete_flow_matching,
-                    dfm_num_steps=getattr(cfg, "dfm_num_steps", 12),
+                    dfm_num_steps=dfm_num_steps,
                     dfm_maskgit_num_steps=dfm_maskgit_num_steps,
                     dfm_maskgit_schedule=dfm_maskgit_schedule,
-                    dfm_schedule=getattr(cfg, "dfm_schedule", "cosine"),
+                    dfm_schedule=dfm_schedule,
                     dfm_temperature=getattr(cfg, "dfm_temperature", 1.0),
                     dfm_temperature_anneal=getattr(cfg, "dfm_temperature_anneal", "none"),
                     dfm_adaptive_step=getattr(cfg, "dfm_adaptive_step", True),
-                    dfm_step_min=getattr(cfg, "dfm_step_min", 1e-4),
-                    dfm_step_max=getattr(cfg, "dfm_step_max", 0.2),
-                    dfm_time_eps=getattr(cfg, "dfm_time_eps", 1e-3),
+                    dfm_step_min=dfm_step_min,
+                    dfm_step_max=dfm_step_max,
+                    dfm_time_eps=dfm_time_eps,
                     dfm_early_exit=getattr(cfg, "dfm_early_exit", True),
                     dfm_early_exit_frac=getattr(cfg, "dfm_early_exit_frac", 0.0),
                     dfm_corrector=getattr(cfg, "dfm_corrector", False),

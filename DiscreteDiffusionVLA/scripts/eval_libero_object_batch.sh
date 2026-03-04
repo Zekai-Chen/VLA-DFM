@@ -8,6 +8,10 @@ TOTAL_SLOTS=$((NUM_GPUS * MAX_PER_GPU))
 
 LOG_DIR=../logs/discrete_diffusion_libero_spatial/$(date +'%m%d_%H%M')
 mkdir -p "$LOG_DIR"
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
+DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
+DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
+GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 
 # 要跑的 STEPS（以列表形式定义，方便增删）
 STEPS=(
@@ -40,6 +44,12 @@ start_job() {
   CUDA_VISIBLE_DEVICES=$GPU \
     python ../experiments/robot/libero/run_libero_eval.py \
       --pretrained_checkpoint "/path/to/xxx--${STEP}_chkpt" \
+      --sync_model_logic True \
+      --use_checkpoint_defaults True \
+      --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+      --debug_log_every ${DEBUG_LOG_EVERY} \
+      --gripper_audit ${GRIPPER_AUDIT} \
       --task_suite_name libero_object \
       --use_l1_regression False \
       --use_diffusion False \

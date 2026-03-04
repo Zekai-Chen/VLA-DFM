@@ -9,11 +9,11 @@ import logging
 import os
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import draccus
 import numpy as np
@@ -54,8 +54,14 @@ from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.training.train_utils import compute_token_accuracy, get_current_action_mask
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK, STOP_INDEX
-from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+from prismatic.vla.constants import (
+    ACTION_DIM,
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
+    NUM_ACTIONS_CHUNK,
+    NormalizationType,
+    STOP_INDEX,
+)
 
 
 # Define task suite constants
@@ -84,6 +90,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+_GRIPPER_DEBUG_WARNED = False
+_GRIPPER_OVERRIDE_WARNED = False
 
 
 @dataclass
@@ -95,6 +103,8 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    sync_model_logic: bool = True                    # If True, overwrite checkpoint logic with repo code
+    legacy_eval_mode: bool = False                   # If True, use legacy prompt/tokenization for old checkpoints
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
@@ -104,16 +114,16 @@ class GenerateConfig:
     use_discrete_diffusion: bool = False             # If True, uses discrete diffusion model for action generation
     topk_filter_thres: float = 0.0              # (When `use_discrete_diffusion==True`) Top-k filter threshold for discrete diffusion model   Only (1 - topk_filter_thres) logits are reserved
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching model for action generation
-    dfm_num_steps: int = 64                          # Number of CTMC steps
-    dfm_maskgit_num_steps: int = 12                  # Number of MaskGIT iterations (when decode_mode=maskgit)
-    dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (when decode_mode=maskgit)
-    dfm_schedule: str = "linear"                     # Schedule for kappa(t)
+    dfm_num_steps: int = 0                           # Number of CTMC steps (0 = use checkpoint config)
+    dfm_maskgit_num_steps: int = 0                   # Number of MaskGIT iterations (0 = use checkpoint config)
+    dfm_maskgit_schedule: str = "auto"               # MaskGIT schedule (auto = use checkpoint config)
+    dfm_schedule: str = "auto"                       # Schedule for kappa(t) (auto = use checkpoint config)
     dfm_temperature: float = 1.0                     # Sampling temperature
     dfm_temperature_anneal: str = "none"             # none | linear
     dfm_adaptive_step: bool = True                   # Adaptive step size for CTMC
     dfm_step_min: float = 1e-4                       # Minimum step size
     dfm_step_max: float = 0.2                        # Maximum step size
-    dfm_time_eps: float = 1e-3                       # Avoid t endpoints
+    dfm_time_eps: float = -1.0                       # Avoid t endpoints (-1 = use checkpoint config)
     dfm_early_exit: bool = False                     # Stop if no tokens change
     dfm_early_exit_frac: float = 0.0                 # Stop if changed/total < frac
     dfm_corrector: bool = False                      # Optional remask corrector
@@ -123,6 +133,8 @@ class GenerateConfig:
     dfm_clamp_values: Optional[str] = None           # Optional clamp values spec/path
     dfm_decode_mode: str = "ctmc"                    # DFM decode mode: ctmc | maskgit
 
+    use_checkpoint_defaults: bool = True             # Prefer checkpoint config when eval params are unset
+
     # DFM debug / tracing
     dfm_debug: bool = False                          # If True, emit per-chunk debug payloads
     dfm_debug_level: int = 1                         # 1 = cheap invariants, 2 = per-step dynamics
@@ -131,6 +143,19 @@ class GenerateConfig:
     dfm_min_valid_action_frac: float = 0.999         # Fail-fast threshold for in-action fraction
     dfm_max_mask_frac: float = 0.0                   # Fail-fast threshold for final mask fraction
     dfm_max_nan_frac: float = 0.0                    # Fail-fast threshold for NaN action fraction
+
+    # Action vocab overrides (legacy compatibility)
+    action_vocab_anchor: Optional[str] = None        # Override action vocab anchor (pad|vocab_size|legacy)
+    action_token_begin_idx: Optional[int] = None     # Override action token begin index
+
+    # Gripper audit
+    gripper_audit: bool = False                      # If True, collect per-chunk gripper stats + token hist
+    gripper_debug_raw: bool = False                  # If True, bypass gripper postprocess for sanity runs
+    gripper_trace: bool = False                      # If True, log gripper postprocess trace
+    force_gripper_value: Optional[float] = None      # If set, force gripper value (env action space)
+    force_gripper_steps: int = 0                     # Number of env steps to force gripper value
+    debug_log_all_metrics: bool = True               # If True, emit full debug payloads into eval log
+    debug_log_every: int = 1                         # Emit debug payload every N chunks (1 = every)
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -224,7 +249,8 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
-        validate_model_tokenizer_alignment(model, processor.tokenizer)
+        require_mask = (cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching) and not cfg.legacy_eval_mode
+        validate_model_tokenizer_alignment(model, processor.tokenizer, require_mask_token=require_mask)
         check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
@@ -276,6 +302,283 @@ def log_message(message: str, log_file=None):
     if log_file:
         log_file.write(message + "\n")
         log_file.flush()
+
+
+def _derive_action_vocab_range(
+    n_action_bins: Optional[int],
+    anchor: Optional[str],
+    pad_token_id: Optional[int],
+    vocab_len: Optional[int],
+    begin_override: Optional[int],
+) -> Tuple[Optional[int], Optional[int]]:
+    if n_action_bins is None:
+        return None, None
+    if begin_override is not None:
+        action_begin = int(begin_override)
+        action_end = int(action_begin + n_action_bins)
+        return action_begin, action_end
+    if anchor == "legacy":
+        action_begin = int(ACTION_TOKEN_BEGIN_IDX)
+        action_end = int(action_begin + n_action_bins)
+        return action_begin, action_end
+    if anchor == "pad":
+        if pad_token_id is None:
+            return None, None
+        action_end = int(pad_token_id)
+        action_begin = int(action_end - n_action_bins)
+        return action_begin, action_end
+    if anchor == "vocab_size":
+        if vocab_len is None:
+            return None, None
+        action_end = int(vocab_len)
+        action_begin = int(action_end - n_action_bins)
+        return action_begin, action_end
+    return None, None
+
+
+def _log_action_vocab_summary(model, processor, log_file=None) -> None:
+    if processor is None:
+        return
+    tok = processor.tokenizer
+    vocab_len = len(tok) if tok is not None else None
+    pad_id = tok.pad_token_id if tok is not None else None
+    mask_id = tok.mask_token_id if tok is not None else None
+    n_action_bins = getattr(model.config, "n_action_bins", None)
+    anchor = getattr(model.config, "action_vocab_anchor", None)
+    begin_override = getattr(model.config, "action_token_begin_idx", None)
+    action_begin, action_end = _derive_action_vocab_range(
+        n_action_bins=n_action_bins,
+        anchor=anchor,
+        pad_token_id=pad_id,
+        vocab_len=vocab_len,
+        begin_override=begin_override,
+    )
+    log_message(
+        f"[action_vocab] vocab_len={vocab_len} pad_token_id={pad_id} mask_token_id={mask_id} "
+        f"n_action_bins={n_action_bins} anchor={anchor} action_token_begin_idx={begin_override}",
+        log_file,
+    )
+    log_message(
+        f"[action_vocab] action_range=[{action_begin}, {action_end})",
+        log_file,
+    )
+
+
+def _resolve_dfm_param(cfg: GenerateConfig, model_cfg, name: str, empty_values: tuple, default):
+    value = getattr(cfg, name, None)
+    if value in empty_values:
+        if getattr(cfg, "use_checkpoint_defaults", True):
+            value = getattr(model_cfg, name, default)
+        else:
+            value = default
+    return value
+
+
+def _log_dfm_params(cfg: GenerateConfig, model, log_file=None) -> None:
+    if model is None or not hasattr(model, "config"):
+        return
+    model_cfg = model.config
+    dfm_num_steps = _resolve_dfm_param(cfg, model_cfg, "dfm_num_steps", (None, 0), 12)
+    dfm_schedule = _resolve_dfm_param(cfg, model_cfg, "dfm_schedule", (None, "", "auto"), "cosine")
+    dfm_maskgit_num_steps = _resolve_dfm_param(cfg, model_cfg, "dfm_maskgit_num_steps", (None, 0), 12)
+    dfm_maskgit_schedule = _resolve_dfm_param(cfg, model_cfg, "dfm_maskgit_schedule", (None, "", "auto"), "cosine")
+    dfm_time_eps = _resolve_dfm_param(cfg, model_cfg, "dfm_time_eps", (None, -1, -1.0), 1e-3)
+    dfm_step_min = _resolve_dfm_param(cfg, model_cfg, "dfm_step_min", (None, -1, -1.0), 1e-4)
+    dfm_step_max = _resolve_dfm_param(cfg, model_cfg, "dfm_step_max", (None, -1, -1.0), 0.2)
+
+    log_message(
+        "[dfm_eval] "
+        f"use_checkpoint_defaults={getattr(cfg, 'use_checkpoint_defaults', True)} "
+        f"decode_mode={cfg.dfm_decode_mode} "
+        f"dfm_num_steps={dfm_num_steps} "
+        f"dfm_schedule={dfm_schedule} "
+        f"dfm_maskgit_num_steps={dfm_maskgit_num_steps} "
+        f"dfm_maskgit_schedule={dfm_maskgit_schedule} "
+        f"dfm_time_eps={dfm_time_eps} "
+        f"dfm_step_min={dfm_step_min} "
+        f"dfm_step_max={dfm_step_max}",
+        log_file,
+    )
+
+
+def _log_eval_banner(cfg: GenerateConfig, log_file=None) -> None:
+    log_message(
+        "[eval_config] "
+        f"sync_model_logic={cfg.sync_model_logic} "
+        f"use_checkpoint_defaults={getattr(cfg, 'use_checkpoint_defaults', True)} "
+        f"gripper_debug_raw={cfg.gripper_debug_raw} "
+        f"gripper_trace={cfg.gripper_trace} "
+        f"force_gripper_value={cfg.force_gripper_value} "
+        f"force_gripper_steps={cfg.force_gripper_steps} "
+        f"gripper_audit={cfg.gripper_audit} "
+        f"debug_log_all_metrics={cfg.debug_log_all_metrics} "
+        f"debug_log_every={cfg.debug_log_every} "
+        f"dfm_decode_mode={cfg.dfm_decode_mode}",
+        log_file,
+    )
+
+
+def _to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if torch.is_tensor(obj):
+        return obj.detach().cpu().tolist()
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()
+    return obj
+
+
+def _emit_debug_payload(payload: dict, log_file=None) -> None:
+    payload = _to_jsonable(payload)
+    log_message(f"[debug] {json.dumps(payload, separators=(',', ':'))}", log_file)
+
+
+def _gripper_trace_for_action(action: np.ndarray, model_family: str) -> dict:
+    gripper_pre_norm = float(action[-1])
+    gripper_after_norm = 2 * (gripper_pre_norm - 0.0) / (1.0 - 0.0) - 1.0
+    gripper_after_binarize = float(np.sign(gripper_after_norm))
+    gripper_after_invert = -gripper_after_binarize if model_family == "openvla" else gripper_after_binarize
+    return {
+        "gripper_pre_norm": gripper_pre_norm,
+        "gripper_after_norm": gripper_after_norm,
+        "gripper_after_binarize": gripper_after_binarize,
+        "gripper_after_invert": gripper_after_invert,
+        "gripper_post": gripper_after_invert,
+    }
+
+
+def _compute_action_stats(arr: np.ndarray) -> dict:
+    if arr is None:
+        return {"min": None, "max": None, "mean": None, "std": None, "clip_frac": None}
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return {"min": None, "max": None, "mean": None, "std": None, "clip_frac": None}
+    return {
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "clip_frac": float(np.mean(np.abs(arr) >= 1.0)),
+    }
+
+def _normalize_actions(actions_unnorm: np.ndarray, stats: dict) -> np.ndarray:
+    mask = stats.get("mask", np.ones_like(stats["min"], dtype=bool))
+    if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+        high = np.asarray(stats["max"])
+        low = np.asarray(stats["min"])
+    elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+        high = np.asarray(stats["q99"])
+        low = np.asarray(stats["q01"])
+    else:
+        raise ValueError(f"Unsupported normalization type: {ACTION_PROPRIO_NORMALIZATION_TYPE}")
+    normed = np.where(
+        mask,
+        2 * (actions_unnorm - low) / (high - low + 1e-8) - 1.0,
+        actions_unnorm,
+    )
+    return np.clip(normed, -1.0, 1.0)
+
+
+def _gripper_offsets(action_dim: int, num_actions_chunk: int) -> List[int]:
+    return [action_dim - 1 + i * action_dim for i in range(num_actions_chunk)]
+
+
+def _update_gripper_audit(
+    actions: np.ndarray,
+    cfg: GenerateConfig,
+    action_tokenizer: ActionTokenizer,
+    action_stats: dict,
+    audit_state: dict,
+    audit_writer=None,
+    task_id: Optional[int] = None,
+    episode_idx: Optional[int] = None,
+    chunk_idx: Optional[int] = None,
+) -> None:
+    if actions is None or audit_state is None:
+        return
+    actions_np = np.asarray(actions)
+    if actions_np.size == 0:
+        return
+
+    raw_gripper = actions_np.reshape(-1, actions_np.shape[-1])[:, -1]
+    post_actions = np.stack(
+        [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
+        axis=0,
+    )
+    post_gripper = post_actions.reshape(-1, post_actions.shape[-1])[:, -1]
+
+    audit_state["gripper_raw"].extend(raw_gripper.tolist())
+    audit_state["gripper_post"].extend(post_gripper.tolist())
+
+    # Token histogram for gripper positions
+    try:
+        actions_norm = _normalize_actions(actions_np, action_stats)
+        token_ids = action_tokenizer.encode_actions_to_token_ids(actions_norm).reshape(-1)
+        offsets = _gripper_offsets(ACTION_DIM, NUM_ACTIONS_CHUNK)
+        gripper_token_ids = token_ids[offsets]
+        audit_state["gripper_token_hist"].update(gripper_token_ids.tolist())
+    except Exception:
+        gripper_token_ids = []
+
+    audit_state["chunks"] += 1
+
+    if audit_writer is not None:
+        audit_writer.write(
+            {
+                "task_id": task_id,
+                "episode": episode_idx,
+                "chunk_idx": chunk_idx,
+                "gripper_raw": raw_gripper.tolist(),
+                "gripper_post": post_gripper.tolist(),
+                "gripper_token_ids": list(gripper_token_ids),
+            }
+        )
+
+
+def _log_gripper_audit_summary(audit_state: dict, log_file=None) -> None:
+    if not audit_state or not audit_state.get("gripper_raw"):
+        log_message("[gripper_audit] no data collected", log_file)
+        return
+
+    raw = np.asarray(audit_state["gripper_raw"], dtype=np.float32)
+    post = np.asarray(audit_state["gripper_post"], dtype=np.float32)
+    close_rate = float(np.mean(post > 0))
+
+    def _summary(arr: np.ndarray) -> dict:
+        return {
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+        }
+
+    raw_summary = _summary(raw)
+    post_summary = _summary(post)
+    raw_hist = np.histogram(raw, bins=10)
+    post_hist = np.histogram(post, bins=10)
+
+    log_message(
+        f"[gripper_audit] chunks={audit_state.get('chunks', 0)} close_rate={close_rate:.4f}",
+        log_file,
+    )
+    log_message(f"[gripper_audit] gripper_raw_summary={raw_summary}", log_file)
+    log_message(f"[gripper_audit] gripper_post_summary={post_summary}", log_file)
+    log_message(
+        f"[gripper_audit] gripper_raw_hist_bins={raw_hist[1].tolist()} counts={raw_hist[0].tolist()}",
+        log_file,
+    )
+    log_message(
+        f"[gripper_audit] gripper_post_hist_bins={post_hist[1].tolist()} counts={post_hist[0].tolist()}",
+        log_file,
+    )
+    log_message(
+        f"[gripper_audit] gripper_token_hist={dict(sorted(audit_state['gripper_token_hist'].items()))}",
+        log_file,
+    )
 
 
 def _compute_num_patches(model, use_proprio: bool) -> int:
@@ -364,10 +667,23 @@ def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, tas
         )
         return
 
+    try:
+        from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+    except Exception as exc:
+        log_message(f"Eval probe import failed ({exc}); skipping probe.", log_file)
+        return
+
     # Build action tokenizer and dataset
     n_action_bins = getattr(model.config, "n_action_bins", 256)
     anchor = getattr(model.config, "action_vocab_anchor", "pad")
-    action_tokenizer = ActionTokenizer(processor.tokenizer, bins=n_action_bins, action_vocab_anchor=anchor)
+    begin_override = getattr(model.config, "action_token_begin_idx", None)
+    action_tokenizer = ActionTokenizer(
+        processor.tokenizer,
+        bins=n_action_bins,
+        action_vocab_anchor=anchor,
+        action_token_begin_idx=begin_override,
+        legacy_bins=cfg.legacy_eval_mode,
+    )
     use_wrist_image = cfg.num_images_in_input > 1
     batch_transform = RLDSBatchTransform(
         action_tokenizer,
@@ -421,7 +737,7 @@ def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, tas
         actions_unnorm = model._unnormalize_actions(actions_norm, cfg.unnorm_key)
         success = False
         for action in actions_unnorm:
-            action_proc = process_action(action, cfg.model_family)
+            action_proc = process_action(action, cfg.model_family, cfg.gripper_debug_raw)
             obs, reward, done, info = env.step(action_proc.tolist())
             if done:
                 success = True
@@ -484,8 +800,15 @@ def prepare_observation(obs, resize_size):
     return observation, img  # Return both processed observation and original image for replay
 
 
-def process_action(action, model_family):
+def process_action(action, model_family, gripper_debug_raw: bool = False):
     """Process action before sending to environment."""
+    global _GRIPPER_DEBUG_WARNED
+    if gripper_debug_raw:
+        if not _GRIPPER_DEBUG_WARNED:
+            _GRIPPER_DEBUG_WARNED = True
+            print("WARNING: gripper_debug_raw enabled; skipping gripper postprocess (binarize/invert).")
+        return action
+
     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
     action = normalize_gripper_action(action, binarize=True)
 
@@ -510,9 +833,14 @@ def run_episode(
     proprio_projector=None,
     noisy_action_projector=None,
     initial_state=None,
+    gripper_audit_state=None,
+    gripper_audit_writer=None,
+    action_tokenizer: Optional[ActionTokenizer] = None,
+    action_stats: Optional[dict] = None,
     log_file=None,
 ):
     """Run a single episode in the environment."""
+    global _GRIPPER_OVERRIDE_WARNED
     # Reset environment
     env.reset()
 
@@ -559,7 +887,6 @@ def run_episode(
             # If action queue is empty, requery model
             if len(action_queue) == 0:
                 debug = None
-                # Query model to get action
                 if cfg.dfm_debug and cfg.use_discrete_flow_matching:
                     actions, debug = get_action(
                         cfg,
@@ -593,7 +920,7 @@ def run_episode(
                                 float(np.mean(np.abs(actions_np) >= 1.0)) if actions_np.size else None
                             )
                             post_actions = np.stack(
-                                [process_action(a.copy(), cfg.model_family) for a in actions_np],
+                                [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
                                 axis=0,
                             ) if actions_np.size else actions_np
                             if post_actions.size > 0:
@@ -637,7 +964,6 @@ def run_episode(
                                 "dfm_unresolved_count": dfm_stats.get("dfm_unresolved_count"),
                                 "dfm_num_changed_tokens": dfm_stats.get("dfm_num_changed_tokens"),
                             }
-                        # Integrity check for maskgit decoding
                         if cfg.dfm_decode_mode == "maskgit":
                             dfm_stats = debug.get("dfm_stats", {}) if debug is not None else {}
                             n_action = dfm_stats.get("dfm_n_action_positions")
@@ -689,6 +1015,86 @@ def run_episode(
                         use_discrete_flow_matching=cfg.use_discrete_flow_matching,
                         dfm_decode_mode=cfg.dfm_decode_mode,
                     )
+
+                if cfg.debug_log_all_metrics and (cfg.debug_log_every <= 1 or (chunk_idx % cfg.debug_log_every == 0)):
+                    actions_np = np.asarray(actions) if actions is not None else np.asarray([])
+                    if actions_np.size > 0:
+                        actions_post = np.stack(
+                            [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
+                            axis=0,
+                        )
+                    else:
+                        actions_post = actions_np
+
+                    gripper_raw = (
+                        actions_np.reshape(-1, actions_np.shape[-1])[:, -1].tolist()
+                        if actions_np.size > 0
+                        else []
+                    )
+                    gripper_post = (
+                        actions_post.reshape(-1, actions_post.shape[-1])[:, -1].tolist()
+                        if actions_post.size > 0
+                        else []
+                    )
+
+                    payload = {
+                        "task": task_description,
+                        "task_id": task_id,
+                        "episode": episode_idx,
+                        "env_step": t,
+                        "chunk_idx": chunk_idx,
+                        "seed": cfg.seed,
+                        "model_family": cfg.model_family,
+                        "unnorm_key": getattr(cfg, "unnorm_key", None),
+                        "actions_raw": actions_np.tolist() if actions_np.size > 0 else [],
+                        "actions_post": actions_post.tolist() if actions_post.size > 0 else [],
+                        "action_unnorm_stats": _compute_action_stats(actions_np),
+                        "action_postprocess_stats": _compute_action_stats(actions_post),
+                        "gripper_raw": gripper_raw,
+                        "gripper_post": gripper_post,
+                        "gripper_debug_raw": cfg.gripper_debug_raw,
+                    }
+
+                    force_enabled = (cfg.force_gripper_value is not None) and (cfg.force_gripper_steps > 0)
+                    payload["gripper_force"] = {
+                        "enabled": force_enabled,
+                        "value": cfg.force_gripper_value,
+                        "steps": cfg.force_gripper_steps,
+                        "active": bool(force_enabled and (t < cfg.force_gripper_steps)),
+                    }
+
+                    if cfg.gripper_trace and (not cfg.gripper_debug_raw) and actions_np.size > 0:
+                        payload["gripper_trace"] = [
+                            _gripper_trace_for_action(a, cfg.model_family) for a in actions_np
+                        ]
+
+                    if debug is not None:
+                        payload["model_debug"] = debug
+
+                    if action_tokenizer is not None and action_stats is not None and actions_np.size > 0:
+                        try:
+                            actions_norm = _normalize_actions(actions_np, action_stats)
+                            token_ids = action_tokenizer.encode_actions_to_token_ids(actions_norm).reshape(-1)
+                            payload["action_token_ids"] = token_ids.tolist()
+                            offsets = _gripper_offsets(ACTION_DIM, NUM_ACTIONS_CHUNK)
+                            payload["gripper_token_ids"] = token_ids[offsets].tolist()
+                        except Exception as exc:
+                            payload["tokenize_error"] = str(exc)
+
+                    _emit_debug_payload(payload, log_file)
+
+                if cfg.gripper_audit and action_tokenizer is not None and action_stats is not None:
+                    _update_gripper_audit(
+                        actions=actions,
+                        cfg=cfg,
+                        action_tokenizer=action_tokenizer,
+                        action_stats=action_stats,
+                        audit_state=gripper_audit_state,
+                        audit_writer=gripper_audit_writer,
+                        task_id=task_id,
+                        episode_idx=episode_idx,
+                        chunk_idx=chunk_idx,
+                    )
                 chunk_idx += 1
                 if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
                     dfm_stats = model.last_dfm_stats or {}
@@ -702,18 +1108,11 @@ def run_episode(
                         "DFM/Num Changed Mean": num_changed_mean,
                     }
                     mask_frac_final = dfm_stats.get("dfm_mask_frac_final", None)
+                    in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
                     if mask_frac_final is not None:
                         log_payload["DFM/Mask Frac Final"] = mask_frac_final
-                    in_action_frac = dfm_stats.get("dfm_in_action_frac_final", None)
                     if in_action_frac is not None:
-                        log_payload["DFM/InActionFracFinal"] = in_action_frac
-                    if debug is not None:
-                        changed_off = debug.get("changed_off_action_count")
-                        if changed_off is not None:
-                            log_payload["DFM/ChangedOffActionCount"] = changed_off
-                        stop_corrupted = debug.get("stop_token_corrupted")
-                        if stop_corrupted is not None:
-                            log_payload["DFM/StopTokenCorrupted"] = float(stop_corrupted)
+                        log_payload["DFM/In Action Frac Final"] = in_action_frac
                     wandb.log(log_payload)
                 action_queue.extend(actions)
 
@@ -721,7 +1120,18 @@ def run_episode(
             action = action_queue.popleft()
 
             # Process action
-            action = process_action(action, cfg.model_family)
+            action = process_action(action, cfg.model_family, cfg.gripper_debug_raw)
+
+            if cfg.force_gripper_value is not None and cfg.force_gripper_steps > 0 and t < cfg.force_gripper_steps:
+                if not _GRIPPER_OVERRIDE_WARNED:
+                    _GRIPPER_OVERRIDE_WARNED = True
+                    log_message(
+                        f"[gripper_override] forcing gripper={cfg.force_gripper_value} "
+                        f"for first {cfg.force_gripper_steps} env steps",
+                        log_file,
+                    )
+                action = action.copy()
+                action[-1] = float(cfg.force_gripper_value)
 
             # Execute action in environment
             obs, reward, done, info = env.step(action.tolist())
@@ -757,6 +1167,10 @@ def run_task(
     action_head=None,
     proprio_projector=None,
     noisy_action_projector=None,
+    gripper_audit_state=None,
+    gripper_audit_writer=None,
+    action_tokenizer: Optional[ActionTokenizer] = None,
+    action_stats: Optional[dict] = None,
     total_episodes=0,
     total_successes=0,
     log_file=None,
@@ -809,6 +1223,10 @@ def run_task(
             proprio_projector,
             noisy_action_projector,
             initial_state,
+            gripper_audit_state,
+            gripper_audit_writer,
+            action_tokenizer,
+            action_stats,
             log_file,
         )
 
@@ -857,6 +1275,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Set random seed
     set_seed_everywhere(cfg.seed)
 
+    legacy_forced_sync = False
+    if cfg.legacy_eval_mode and cfg.use_discrete_diffusion:
+        if not cfg.sync_model_logic:
+            cfg.sync_model_logic = True
+            legacy_forced_sync = True
+    elif cfg.legacy_eval_mode and cfg.sync_model_logic:
+        cfg.sync_model_logic = False
+        legacy_forced_sync = True
+
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
@@ -865,6 +1292,48 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+    if cfg.legacy_eval_mode:
+        if legacy_forced_sync:
+            if cfg.use_discrete_diffusion:
+                log_message(
+                    "[legacy_eval] forcing sync_model_logic=True for discrete diffusion legacy parity",
+                    log_file,
+                )
+            else:
+                log_message("[legacy_eval] forcing sync_model_logic=False for legacy mode", log_file)
+        else:
+            log_message(f"[legacy_eval] legacy_eval_mode=True sync_model_logic={cfg.sync_model_logic}", log_file)
+    _log_eval_banner(cfg, log_file)
+    _log_action_vocab_summary(model, processor, log_file)
+    _log_dfm_params(cfg, model, log_file)
+
+    # Action tokenizer for audits only (probes build their own to keep dependencies optional)
+    action_tokenizer = None
+    action_stats = None
+    if cfg.gripper_audit:
+        n_action_bins = getattr(model.config, "n_action_bins", 256)
+        anchor = getattr(model.config, "action_vocab_anchor", "pad")
+        begin_override = getattr(model.config, "action_token_begin_idx", None)
+        action_tokenizer = ActionTokenizer(
+            processor.tokenizer,
+            bins=n_action_bins,
+            action_vocab_anchor=anchor,
+            action_token_begin_idx=begin_override,
+            legacy_bins=cfg.legacy_eval_mode,
+        )
+        action_stats = model.get_action_stats(cfg.unnorm_key)
+    gripper_audit_writer = None
+    gripper_audit_state = None
+    if cfg.gripper_audit:
+        gripper_audit_state = {
+            "gripper_raw": [],
+            "gripper_post": [],
+            "gripper_token_hist": Counter(),
+            "chunks": 0,
+        }
+        gripper_audit_path = os.path.join(cfg.local_log_dir, run_id + "_gripper_audit.jsonl")
+        gripper_audit_writer = JsonlWriter(gripper_audit_path)
+        log_message(f"[gripper_audit] writing per-chunk logs to {gripper_audit_path}", log_file)
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -890,6 +1359,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
             action_head,
             proprio_projector,
             noisy_action_projector,
+            gripper_audit_state,
+            gripper_audit_writer,
+            action_tokenizer,
+            action_stats,
             total_episodes,
             total_successes,
             log_file,
@@ -913,6 +1386,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
             }
         )
         wandb.save(local_log_filepath)
+
+    if gripper_audit_writer is not None:
+        gripper_audit_writer.close()
+    if cfg.gripper_audit and gripper_audit_state is not None:
+        _log_gripper_audit_summary(gripper_audit_state, log_file)
 
     # Close log file
     if log_file:

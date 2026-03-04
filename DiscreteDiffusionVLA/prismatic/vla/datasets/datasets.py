@@ -13,10 +13,18 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, IterableDataset
-from transformers import PreTrainedTokenizerBase
+try:
+    from transformers import PreTrainedTokenizerBase
+except ImportError:  # pragma: no cover - optional dependency in tests
+    class PreTrainedTokenizerBase:  # type: ignore
+        pass
 
 from prismatic.models.backbones.llm.prompting import PromptBuilder
-from prismatic.models.backbones.vision import ImageTransform
+try:
+    from prismatic.models.backbones.vision import ImageTransform
+except ImportError:  # pragma: no cover - optional dependency in tests
+    class ImageTransform:  # type: ignore
+        pass
 from prismatic.util.data_utils import tree_map
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.constants import (
@@ -28,8 +36,14 @@ from prismatic.vla.constants import (
     PROPRIO_DIM,
     STOP_INDEX,
 )
-from prismatic.vla.datasets.rlds import make_interleaved_dataset, make_single_dataset
-from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
+try:
+    from prismatic.vla.datasets.rlds import make_interleaved_dataset, make_single_dataset
+    from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
+except ImportError:  # pragma: no cover - optional dependency in tests
+    make_interleaved_dataset = None  # type: ignore
+    make_single_dataset = None  # type: ignore
+    OXE_NAMED_MIXTURES = {}  # type: ignore
+    get_oxe_dataset_kwargs_and_weights = None  # type: ignore
 
 
 @dataclass
@@ -41,6 +55,7 @@ class RLDSBatchTransform:
     predict_stop_token: bool = True
     use_wrist_image: bool = False
     use_proprio: bool = False
+    legacy_mode: bool = False
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
         """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
@@ -52,36 +67,65 @@ class RLDSBatchTransform:
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
 
-        # Get action token IDs directly (avoid BPE merging ambiguity)
-        future_actions = rlds_batch["action"][1:]
-        current_action_ids = self.action_tokenizer.encode_actions_to_token_ids(current_action)
-        future_action_ids = self.action_tokenizer.encode_actions_to_token_ids(future_actions)
-        action_chunk_ids = np.concatenate([current_action_ids, future_action_ids], axis=0).tolist()
-        action_chunk_len = len(action_chunk_ids)
+        if self.legacy_mode:
+            # Legacy path: tokenize actions into strings and embed directly in prompt (2026-02-27 behavior)
+            future_actions = rlds_batch["action"][1:]
+            future_actions_string = "".join(self.action_tokenizer(future_actions))
+            current_action_string = self.action_tokenizer(current_action)
+            action_chunk_string = current_action_string + future_actions_string
+            action_chunk_len = len(action_chunk_string)
 
-        conversation = [
-            {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            {"from": "gpt", "value": ""},
-        ]
-        for turn in conversation:
-            prompt_builder.add_turn(turn["from"], turn["value"])
+            conversation = [
+                {"from": "human", "value": f"What action should the robot take to {lang}?"},
+                {"from": "gpt", "value": action_chunk_string},
+            ]
+            for turn in conversation:
+                prompt_builder.add_turn(turn["from"], turn["value"])
 
-        # Tokenize (w/ `base_tokenizer`)
-        input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-        if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
-            input_ids = input_ids[:-1]
-        input_ids = input_ids + action_chunk_ids + [STOP_INDEX]
-        labels = list(input_ids)
+            # Tokenize (w/ `base_tokenizer`)
+            input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+            labels = list(input_ids)
 
-        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-        #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
-        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
-        pixel_values = self.image_transform(img)
+            # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+            #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+            input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+            pixel_values = self.image_transform(img)
 
-        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
-        if not self.predict_stop_token:
-            labels[-1] = IGNORE_INDEX
+            # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+            labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
+            if not self.predict_stop_token:
+                labels[-1] = IGNORE_INDEX
+        else:
+            # Get action token IDs directly (avoid BPE merging ambiguity)
+            future_actions = rlds_batch["action"][1:]
+            current_action_ids = self.action_tokenizer.encode_actions_to_token_ids(current_action)
+            future_action_ids = self.action_tokenizer.encode_actions_to_token_ids(future_actions)
+            action_chunk_ids = np.concatenate([current_action_ids, future_action_ids], axis=0).tolist()
+            action_chunk_len = len(action_chunk_ids)
+
+            conversation = [
+                {"from": "human", "value": f"What action should the robot take to {lang}?"},
+                {"from": "gpt", "value": ""},
+            ]
+            for turn in conversation:
+                prompt_builder.add_turn(turn["from"], turn["value"])
+
+            # Tokenize (w/ `base_tokenizer`)
+            input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+            if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
+                input_ids = input_ids[:-1]
+            input_ids = input_ids + action_chunk_ids + [STOP_INDEX]
+            labels = list(input_ids)
+
+            # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+            #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+            input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+            pixel_values = self.image_transform(img)
+
+            # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+            labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
+            if not self.predict_stop_token:
+                labels[-1] = IGNORE_INDEX
 
         return_dict = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name, actions=actions)
 
@@ -114,6 +158,8 @@ class RLDSDataset(IterableDataset):
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
+        if get_oxe_dataset_kwargs_and_weights is None or make_interleaved_dataset is None:
+            raise ImportError("RLDS dataset dependencies are not installed; cannot construct RLDSDataset.")
 
         # Configure RLDS Dataset(s)
         if self.data_mix in OXE_NAMED_MIXTURES:
@@ -179,6 +225,8 @@ class RLDSDataset(IterableDataset):
         self.dataset, self.dataset_length, self.dataset_statistics = self.make_dataset(rlds_config)
 
     def make_dataset(self, rlds_config):
+        if make_interleaved_dataset is None:
+            raise ImportError("RLDS dataset dependencies are not installed; cannot construct RLDSDataset.")
         return make_interleaved_dataset(**rlds_config)
 
     def __iter__(self) -> Dict[str, Any]:
@@ -200,6 +248,8 @@ class EpisodicRLDSDataset(RLDSDataset):
         per_dataset_kwargs = rlds_config["dataset_kwargs_list"]
         assert len(per_dataset_kwargs) == 1, "Only support single-dataset `mixes` for episodic datasets."
 
+        if make_single_dataset is None:
+            raise ImportError("RLDS dataset dependencies are not installed; cannot construct EpisodicRLDSDataset.")
         return make_single_dataset(
             per_dataset_kwargs[0],
             train=rlds_config["train"],
@@ -223,11 +273,13 @@ class DummyDataset(Dataset):
         base_tokenizer: PreTrainedTokenizerBase,
         image_transform: ImageTransform,
         prompt_builder_fn: Type[PromptBuilder],
+        legacy_mode: bool = False,
     ) -> None:
         self.action_tokenizer = action_tokenizer
         self.base_tokenizer = base_tokenizer
         self.image_transform = image_transform
         self.prompt_builder_fn = prompt_builder_fn
+        self.legacy_mode = legacy_mode
 
         # Note =>> We expect the dataset to store statistics for action de-normalization. Specifically, we store the
         # per-dimension 1st and 99th action quantile. The values below correspond to "no normalization" for simplicity.
@@ -249,28 +301,43 @@ class DummyDataset(Dataset):
 
         # Add instruction to VLA prompt
         prompt_builder = self.prompt_builder_fn("openvla")
-        conversation = [
-            {"from": "human", "value": f"What action should the robot take to {instruction}?"},
-            {"from": "gpt", "value": ""},
-        ]
+        if self.legacy_mode:
+            conversation = [
+                {"from": "human", "value": f"What action should the robot take to {instruction}?"},
+                {"from": "gpt", "value": self.action_tokenizer(action)},
+            ]
+        else:
+            conversation = [
+                {"from": "human", "value": f"What action should the robot take to {instruction}?"},
+                {"from": "gpt", "value": ""},
+            ]
         for turn in conversation:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
         # Tokenize (w/ `base_tokenizer`)
         input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-        if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
-            input_ids = input_ids[:-1]
-        action_ids = self.action_tokenizer.encode_actions_to_token_ids(action).tolist()
-        input_ids = input_ids + action_ids + [STOP_INDEX]
-        labels = list(input_ids)
+        if self.legacy_mode:
+            labels = list(input_ids)
+            # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+            #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+            input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+            pixel_values = self.image_transform(image)
 
-        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-        #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
-        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
-        pixel_values = self.image_transform(image)
+            # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+            labels[: -(len(action) + 1)] = IGNORE_INDEX
+        else:
+            if len(input_ids) > 0 and input_ids[-1] == STOP_INDEX:
+                input_ids = input_ids[:-1]
+            action_ids = self.action_tokenizer.encode_actions_to_token_ids(action).tolist()
+            input_ids = input_ids + action_ids + [STOP_INDEX]
+            labels = list(input_ids)
 
-        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        action_ids = self.action_tokenizer.encode_actions_to_token_ids(action).tolist()
-        labels[: -(len(action_ids) + 1)] = IGNORE_INDEX
+            # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+            #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+            input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+            pixel_values = self.image_transform(image)
+
+            # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+            labels[: -(len(action_ids) + 1)] = IGNORE_INDEX
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)

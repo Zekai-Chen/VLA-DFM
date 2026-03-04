@@ -22,6 +22,8 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
+MODEL_LOGIC_REV = "2026-03-03-maskgit-12step-remask-gripper-audit"
+
 from prismatic.discrete_flow import (
     dfm_decode,
     kappa,
@@ -36,6 +38,7 @@ from prismatic.training.train_utils import (
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     STOP_INDEX,
@@ -463,7 +466,21 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if n_bins is None:
             raise ValueError("n_action_bins must be set on config or via bin_centers.")
         n_bins = int(n_bins)
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            action_begin = int(ACTION_TOKEN_BEGIN_IDX + 1)
+            action_end = int(action_begin + n_bins)
+            return action_begin, action_end, n_bins
+        begin_override = getattr(self.config, "action_token_begin_idx", None)
+        if begin_override is not None:
+            action_begin = int(begin_override)
+            action_end = int(action_begin + n_bins)
+            return action_begin, action_end, n_bins
+
         anchor = getattr(self.config, "action_vocab_anchor", "pad")
+        if anchor == "legacy":
+            action_begin = int(ACTION_TOKEN_BEGIN_IDX)
+            action_end = int(action_begin + n_bins)
+            return action_begin, action_end, n_bins
         if anchor == "pad":
             action_end = int(self.pad_token_id)
         elif anchor == "vocab_size":
@@ -475,27 +492,31 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _validate_action_vocab(self) -> None:
         """Validate that special tokens do not overlap action bins."""
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            return
         if not hasattr(self.config, "n_action_bins") and not hasattr(self, "bin_centers"):
             return
         action_begin, action_end, _ = self._action_vocab_range()
         if action_begin < 0:
             raise ValueError(f"Action vocab begin ({action_begin}) is negative; check n_action_bins/pad_token_id.")
-        anchor = getattr(self.config, "action_vocab_anchor", "pad")
-        if anchor == "pad":
-            if action_begin <= self.pad_token_id < action_end:
-                raise ValueError(
-                    f"pad_token_id ({self.pad_token_id}) overlaps action range [{action_begin}, {action_end})."
-                )
-            if action_begin <= self.mask_token_id < action_end:
-                raise ValueError(
-                    f"mask_token_id ({self.mask_token_id}) overlaps action range [{action_begin}, {action_end})."
-                )
+        if action_begin <= self.pad_token_id < action_end:
+            raise ValueError(
+                f"pad_token_id ({self.pad_token_id}) overlaps action range [{action_begin}, {action_end})."
+            )
+        if action_begin <= self.mask_token_id < action_end:
+            raise ValueError(
+                f"mask_token_id ({self.mask_token_id}) overlaps action range [{action_begin}, {action_end})."
+            )
 
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""
-        action_begin, action_end, _ = self._action_vocab_range()
-        current_action_mask = get_current_action_mask(labels, action_begin, action_end)
-        next_actions_mask = get_next_actions_mask(labels, action_begin, action_end)
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            current_action_mask = get_current_action_mask(labels)
+            next_actions_mask = get_next_actions_mask(labels)
+        else:
+            action_begin, action_end, _ = self._action_vocab_range()
+            current_action_mask = get_current_action_mask(labels, action_begin, action_end)
+            next_actions_mask = get_next_actions_mask(labels, action_begin, action_end)
         all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
         return all_actions_mask
 
@@ -733,6 +754,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         time_eps: float = 1e-3,
         t_min: float = 0.0,
         t_max: float = 1.0,
+        t_bias_alpha: float = 1.0,
     ):
         """
         Apply mask-only corruption following a DFM mixture path.
@@ -746,7 +768,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         t_high = min(t_max, 1.0 - time_eps)
         if t_high <= t_low:
             raise ValueError("Invalid DFM time range after applying eps clamp.")
-        t = torch.rand(B, device=device) * (t_high - t_low) + t_low
+        u = torch.rand(B, device=device)
+        if t_bias_alpha is not None and t_bias_alpha != 1.0:
+            u = torch.pow(u, t_bias_alpha)
+        t = u * (t_high - t_low) + t_low
         kappa_t = kappa(t, schedule=schedule)
         kdot_t = kappa_dot(t, schedule=schedule)
 
@@ -838,6 +863,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_loss_mode: Optional[str] = None,
         dfm_weight_clip: float = 20.0,
         dfm_train_mode: Optional[str] = None,
+        dfm_t_bias_alpha: Optional[float] = None,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -866,6 +892,8 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_schedule = dfm_schedule or getattr(self.config, "dfm_schedule", "cosine")
         dfm_loss_mode = dfm_loss_mode or getattr(self.config, "dfm_loss_mode", "generalized_kl")
         dfm_train_mode = dfm_train_mode or "flow"
+        if dfm_t_bias_alpha is None:
+            dfm_t_bias_alpha = getattr(self.config, "dfm_t_bias_alpha", 1.0)
 
         # === Handle Generation with Cache (`input_ids.shape[1] == 1`) =>> requires `past_keys_values` ===
         if input_ids.shape[1] == 1:
@@ -1019,6 +1047,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                         time_eps=dfm_time_eps,
                         t_min=dfm_t_min,
                         t_max=dfm_t_max,
+                        t_bias_alpha=dfm_t_bias_alpha,
                     )
                     denom = (1.0 - kappa_t).clamp(min=1e-8)
                     dfm_weight = (kdot_t / denom).clamp(min=0.0, max=dfm_weight_clip)
@@ -1374,8 +1403,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         super().__init__(config)
         self.norm_stats = config.norm_stats
 
-        # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
+        # Compute action bins (legacy DD uses n_bins edges, not n_bins+1)
+        legacy_bins = getattr(config, "legacy_train_mode", False) or getattr(config, "legacy_eval_mode", False)
+        if legacy_bins:
+            self.bins = np.linspace(-1, 1, config.n_action_bins)
+        else:
+            self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # check if config has topk_filter_thres
@@ -1413,8 +1446,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        action_begin, _, _ = self._action_vocab_range()
-        ARBITRARY_ACTION_TOKEN_IDX = action_begin
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        else:
+            action_begin, _, _ = self._action_vocab_range()
+            ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
@@ -1622,6 +1658,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             # normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
             # normalized_actions = normalized_actions.float().cpu().detach().numpy()
         else:
+            legacy_eval_mode = getattr(self.config, "legacy_eval_mode", False)
 
             def tokens_to_logits(suffix_seq: torch.LongTensor) -> torch.Tensor:
 
@@ -1661,12 +1698,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
                     :self.vocab_size
                 ]
-                action_begin, action_end, _ = self._action_vocab_range()
-                neg_inf = torch.finfo(full_logits.dtype).min
-                if action_begin > 0:
-                    full_logits[..., :action_begin] = neg_inf
-                if action_end < full_logits.shape[-1]:
-                    full_logits[..., action_end:] = neg_inf
+                if not legacy_eval_mode:
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    neg_inf = torch.finfo(full_logits.dtype).min
+                    if action_begin > 0:
+                        full_logits[..., :action_begin] = neg_inf
+                    if action_end < full_logits.shape[-1]:
+                        full_logits[..., action_end:] = neg_inf
 
                 # Extract hidden states for action tokens
                 last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
@@ -1683,15 +1721,28 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             mask_token_id = self.mask_token_id
             # Warn once if mask token collides with action-token range
             if not getattr(self, "_dfm_mask_collision_warned", False):
-                action_begin, action_end, _ = self._action_vocab_range()
-                if action_begin <= mask_token_id < action_end:
-                    logger.warning(
-                        "mask_token_id (%d) overlaps action-token range [%d, %d]. "
-                        "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
-                        mask_token_id,
-                        action_begin,
-                        action_end - 1,
-                    )
+                if legacy_eval_mode:
+                    n_bins = self.bin_centers.shape[0] + 1
+                    action_low = self.vocab_size - n_bins
+                    action_high = self.vocab_size - 1
+                    if action_low <= mask_token_id <= action_high:
+                        logger.warning(
+                            "mask_token_id (%d) overlaps action-token range [%d, %d]. "
+                            "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
+                            mask_token_id,
+                            action_low,
+                            action_high,
+                        )
+                else:
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    if action_begin <= mask_token_id < action_end:
+                        logger.warning(
+                            "mask_token_id (%d) overlaps action-token range [%d, %d]. "
+                            "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
+                            mask_token_id,
+                            action_begin,
+                            action_end - 1,
+                        )
                 self._dfm_mask_collision_warned = True
             masked_input_ids = torch.where(
                 all_actions_mask, torch.tensor(mask_token_id, device=input_ids.device), input_ids
@@ -1701,22 +1752,41 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 :, 1+NUM_PROMPT_TOKENS:1+NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK
             ]  # (B, seq_len)
 
-            final_iters, actions_hidden_states = parallel_decode.decode(
-                init_ids=cur_seqs,
-                tokens_to_logits=tokens_to_logits,
-                mask_token_id=self.mask_token_id,
-                num_iter=12,
-                choice_temperature=1.0,  # to_test
-                mask_scheduling_method="cosine",
-                use_remask=False,
-            )
-
-            predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
-            action_begin, action_end, _ = self._action_vocab_range()
-            discretized_actions = action_end - predicted_action_token_ids
-            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
-            normalized_actions = self.bin_centers[discretized_actions]
-            normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+            if legacy_eval_mode:
+                final_iters, actions_hidden_states = parallel_decode.legacy_decode(
+                    init_ids=cur_seqs,
+                    tokens_to_logits=tokens_to_logits,
+                    mask_token_id=self.mask_token_id,
+                    num_iter=12,
+                    choice_temperature=1.0,  # to_test
+                    mask_scheduling_method="cosine",
+                    use_remask=False,
+                )
+                predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
+                discretized_actions = self.vocab_size - predicted_action_token_ids
+                discretized_actions = np.clip(
+                    discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1
+                )
+                normalized_actions = self.bin_centers[discretized_actions]
+                normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+            else:
+                final_iters, actions_hidden_states = parallel_decode.decode(
+                    init_ids=cur_seqs,
+                    tokens_to_logits=tokens_to_logits,
+                    mask_token_id=self.mask_token_id,
+                    num_iter=12,
+                    choice_temperature=1.0,  # to_test
+                    mask_scheduling_method="cosine",
+                    use_remask=False,
+                )
+                predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
+                action_begin, action_end, _ = self._action_vocab_range()
+                discretized_actions = action_end - predicted_action_token_ids
+                discretized_actions = np.clip(
+                    discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1
+                )
+                normalized_actions = self.bin_centers[discretized_actions]
+                normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
         return normalized_actions, actions_hidden_states
 
@@ -2163,8 +2233,12 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
         super().__init__(config)
         self.norm_stats = config.norm_stats
 
-        # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
+        # Compute action bins (legacy DD uses n_bins edges, not n_bins+1)
+        legacy_bins = getattr(config, "legacy_train_mode", False) or getattr(config, "legacy_eval_mode", False)
+        if legacy_bins:
+            self.bins = np.linspace(-1, 1, config.n_action_bins)
+        else:
+            self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # Compute vocab size for de-tokenization -- revert added "multiple of"
@@ -2196,8 +2270,11 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        action_begin, _, _ = self._action_vocab_range()
-        ARBITRARY_ACTION_TOKEN_IDX = action_begin
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        else:
+            action_begin, _, _ = self._action_vocab_range()
+            ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
