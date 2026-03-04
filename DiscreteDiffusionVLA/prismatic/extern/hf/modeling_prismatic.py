@@ -466,6 +466,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if n_bins is None:
             raise ValueError("n_action_bins must be set on config or via bin_centers.")
         n_bins = int(n_bins)
+        if getattr(self.config, "legacy_eval_mode", False):
+            action_begin = int(self.vocab_size - (self.bin_centers.shape[0] + 1))
+            action_end = int(self.vocab_size)
+            return action_begin, action_end, int(self.bin_centers.shape[0] + 1)
         begin_override = getattr(self.config, "action_token_begin_idx", None)
         if begin_override is not None:
             action_begin = int(begin_override)
@@ -488,6 +492,8 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _validate_action_vocab(self) -> None:
         """Validate that special tokens do not overlap action bins."""
+        if getattr(self.config, "legacy_eval_mode", False):
+            return
         if not hasattr(self.config, "n_action_bins") and not hasattr(self, "bin_centers"):
             return
         action_begin, action_end, _ = self._action_vocab_range()
@@ -1641,6 +1647,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             # normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
             # normalized_actions = normalized_actions.float().cpu().detach().numpy()
         else:
+            legacy_eval_mode = getattr(self.config, "legacy_eval_mode", False)
 
             def tokens_to_logits(suffix_seq: torch.LongTensor) -> torch.Tensor:
 
@@ -1680,12 +1687,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
                     :self.vocab_size
                 ]
-                action_begin, action_end, _ = self._action_vocab_range()
-                neg_inf = torch.finfo(full_logits.dtype).min
-                if action_begin > 0:
-                    full_logits[..., :action_begin] = neg_inf
-                if action_end < full_logits.shape[-1]:
-                    full_logits[..., action_end:] = neg_inf
+                if not legacy_eval_mode:
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    neg_inf = torch.finfo(full_logits.dtype).min
+                    if action_begin > 0:
+                        full_logits[..., :action_begin] = neg_inf
+                    if action_end < full_logits.shape[-1]:
+                        full_logits[..., action_end:] = neg_inf
 
                 # Extract hidden states for action tokens
                 last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
@@ -1702,15 +1710,28 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             mask_token_id = self.mask_token_id
             # Warn once if mask token collides with action-token range
             if not getattr(self, "_dfm_mask_collision_warned", False):
-                action_begin, action_end, _ = self._action_vocab_range()
-                if action_begin <= mask_token_id < action_end:
-                    logger.warning(
-                        "mask_token_id (%d) overlaps action-token range [%d, %d]. "
-                        "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
-                        mask_token_id,
-                        action_begin,
-                        action_end - 1,
-                    )
+                if legacy_eval_mode:
+                    n_bins = self.bin_centers.shape[0] + 1
+                    action_low = self.vocab_size - n_bins
+                    action_high = self.vocab_size - 1
+                    if action_low <= mask_token_id <= action_high:
+                        logger.warning(
+                            "mask_token_id (%d) overlaps action-token range [%d, %d]. "
+                            "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
+                            mask_token_id,
+                            action_low,
+                            action_high,
+                        )
+                else:
+                    action_begin, action_end, _ = self._action_vocab_range()
+                    if action_begin <= mask_token_id < action_end:
+                        logger.warning(
+                            "mask_token_id (%d) overlaps action-token range [%d, %d]. "
+                            "DFM decoding will forbid mask-token sampling, but training/tokenizer config should be fixed.",
+                            mask_token_id,
+                            action_begin,
+                            action_end - 1,
+                        )
                 self._dfm_mask_collision_warned = True
             masked_input_ids = torch.where(
                 all_actions_mask, torch.tensor(mask_token_id, device=input_ids.device), input_ids
@@ -1720,22 +1741,41 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 :, 1+NUM_PROMPT_TOKENS:1+NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK
             ]  # (B, seq_len)
 
-            final_iters, actions_hidden_states = parallel_decode.decode(
-                init_ids=cur_seqs,
-                tokens_to_logits=tokens_to_logits,
-                mask_token_id=self.mask_token_id,
-                num_iter=12,
-                choice_temperature=1.0,  # to_test
-                mask_scheduling_method="cosine",
-                use_remask=False,
-            )
-
-            predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
-            action_begin, action_end, _ = self._action_vocab_range()
-            discretized_actions = action_end - predicted_action_token_ids
-            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
-            normalized_actions = self.bin_centers[discretized_actions]
-            normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+            if legacy_eval_mode:
+                final_iters, actions_hidden_states = parallel_decode.legacy_decode(
+                    init_ids=cur_seqs,
+                    tokens_to_logits=tokens_to_logits,
+                    mask_token_id=self.mask_token_id,
+                    num_iter=12,
+                    choice_temperature=1.0,  # to_test
+                    mask_scheduling_method="cosine",
+                    use_remask=False,
+                )
+                predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
+                discretized_actions = self.vocab_size - predicted_action_token_ids
+                discretized_actions = np.clip(
+                    discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1
+                )
+                normalized_actions = self.bin_centers[discretized_actions]
+                normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+            else:
+                final_iters, actions_hidden_states = parallel_decode.decode(
+                    init_ids=cur_seqs,
+                    tokens_to_logits=tokens_to_logits,
+                    mask_token_id=self.mask_token_id,
+                    num_iter=12,
+                    choice_temperature=1.0,  # to_test
+                    mask_scheduling_method="cosine",
+                    use_remask=False,
+                )
+                predicted_action_token_ids = final_iters[:, -1, :].cpu().numpy()
+                action_begin, action_end, _ = self._action_vocab_range()
+                discretized_actions = action_end - predicted_action_token_ids
+                discretized_actions = np.clip(
+                    discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1
+                )
+                normalized_actions = self.bin_centers[discretized_actions]
+                normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
         return normalized_actions, actions_hidden_states
 
