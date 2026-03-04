@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_0315"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-dd/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-3k-align--20260304_1259"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 # Optional action vocab overrides (empty = use checkpoint config)
@@ -81,7 +81,12 @@ ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-}
 # Prefer repo model code/config by default while debugging
 SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
+GRIPPER_TRACE=${GRIPPER_TRACE:-False}
+# Force gripper in env action space (set FORCE_GRIPPER_VALUE to enable)
+FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
+FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
 DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
@@ -217,13 +222,19 @@ start_job() {
   if [[ -n "${ACTION_TOKEN_BEGIN_IDX}" ]]; then
     EXTRA_ARGS+=(--action_token_begin_idx "${ACTION_TOKEN_BEGIN_IDX}")
   fi
+  if [[ -n "${FORCE_GRIPPER_VALUE}" ]]; then
+    EXTRA_ARGS+=(--force_gripper_value "${FORCE_GRIPPER_VALUE}")
+  fi
 
   CUDA_VISIBLE_DEVICES=$GPU \
     python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --legacy_eval_mode ${LEGACY_EVAL_MODE} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+      --gripper_trace ${GRIPPER_TRACE} \
+      --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
       --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
       --debug_log_every ${DEBUG_LOG_EVERY} \
       --gripper_audit ${GRIPPER_AUDIT} \

@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke_debug/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_0315"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-dd/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-3k-align--20260304_1259"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 # Optional action vocab overrides (empty = use checkpoint config)
@@ -81,6 +81,7 @@ ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-}
 # Prefer repo model code/config by default while debugging
 SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
 GRIPPER_TRACE=${GRIPPER_TRACE:-True}
 # Force gripper closed in env action space (-1=open, +1=close).
@@ -230,6 +231,7 @@ start_job() {
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --legacy_eval_mode ${LEGACY_EVAL_MODE} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
       --gripper_trace ${GRIPPER_TRACE} \
       --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
