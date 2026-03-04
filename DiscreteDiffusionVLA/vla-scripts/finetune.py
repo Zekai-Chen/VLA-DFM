@@ -5,6 +5,7 @@ Fine-tunes OpenVLA via LoRA.
 """
 
 import os
+import json
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -148,6 +149,54 @@ def resolve_torch_dtype(dtype_str: str) -> torch.dtype:
     if normalized in ("fp32", "float32"):
         return torch.float32
     raise ValueError(f"Unsupported torch_dtype: {dtype_str}")
+
+
+def apply_legacy_dd_overrides(cfg, model_config, processor) -> None:
+    """Force legacy DD config fields to match 2026-02-27 behavior."""
+    if not cfg.legacy_train_mode:
+        return
+    print("[legacy_train] applying legacy DD config overrides (anchor=legacy)")
+    model_config.legacy_train_mode = True
+    model_config.legacy_eval_mode = True
+    model_config.action_vocab_anchor = "legacy"
+    model_config.action_token_begin_idx = int(ACTION_TOKEN_BEGIN_IDX)
+    n_bins = int(getattr(model_config, "n_action_bins", 256))
+    expected_begin = int(processor.tokenizer.vocab_size - (n_bins + 1))
+    if expected_begin != int(ACTION_TOKEN_BEGIN_IDX):
+        raise ValueError(
+            "legacy_train_mode requires ACTION_TOKEN_BEGIN_IDX alignment. "
+            f"Expected begin={expected_begin} from vocab_size and n_bins, "
+            f"but ACTION_TOKEN_BEGIN_IDX={ACTION_TOKEN_BEGIN_IDX}. "
+            "Update the tokenizer/vocab or constants for legacy DD training."
+        )
+
+
+def validate_saved_checkpoint_config(cfg, checkpoint_dir: Path) -> None:
+    """Validate legacy DD config fields on disk after saving a checkpoint."""
+    if not (cfg.legacy_train_mode and cfg.use_discrete_diffusion):
+        return
+    cfg_path = checkpoint_dir / "config.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"[legacy_train] config.json not found at {cfg_path}")
+    raw = json.load(open(cfg_path))
+    cfg_dict = raw.get("vla", raw) if isinstance(raw, dict) else {}
+    errors = []
+    if cfg_dict.get("use_discrete_diffusion") is not True:
+        errors.append("use_discrete_diffusion != True")
+    if cfg_dict.get("legacy_train_mode") is not True:
+        errors.append("legacy_train_mode != True")
+    if cfg_dict.get("legacy_eval_mode") is not True:
+        errors.append("legacy_eval_mode != True")
+    if cfg_dict.get("action_vocab_anchor") != "legacy":
+        errors.append(f"action_vocab_anchor != 'legacy' (found {cfg_dict.get('action_vocab_anchor')})")
+    if cfg_dict.get("action_token_begin_idx") != ACTION_TOKEN_BEGIN_IDX:
+        errors.append(
+            f"action_token_begin_idx != {ACTION_TOKEN_BEGIN_IDX} "
+            f"(found {cfg_dict.get('action_token_begin_idx')})"
+        )
+    if errors:
+        raise ValueError("[legacy_train] checkpoint config validation failed: " + "; ".join(errors))
+    print("[legacy_train] checkpoint config validation passed")
 
 
 def _apply_finetune_cfg_to_model_config(cfg, model_config, processor) -> None:
@@ -783,6 +832,7 @@ def save_training_checkpoint(
 
     # Wait for model components to be saved
     dist.barrier()
+    validate_saved_checkpoint_config(cfg, checkpoint_dir)
 
     # Merge LoRA weights into base model and save resulting model checkpoint
     # Note: Can be very slow on some devices; if so, we recommend merging offline
@@ -1028,8 +1078,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
     if cfg.legacy_train_mode:
-        model_config.legacy_eval_mode = True
-        model_config.legacy_train_mode = True
+        apply_legacy_dd_overrides(cfg, model_config, processor)
         # Legacy path: warn (do not fail) if model vocab (after padding) doesn't match tokenizer.vocab_size.
         text_cfg = getattr(model_config, "text_config", None)
         text_vocab = getattr(text_cfg, "vocab_size", None) if text_cfg is not None else None
@@ -1198,7 +1247,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         action_tokenizer = ActionTokenizer(
             processor.tokenizer,
             bins=n_action_bins if n_action_bins is not None else 256,
-            action_vocab_anchor="vocab_size",
+            action_vocab_anchor="legacy",
             legacy_bins=True,
         )
         expected_begin = int(processor.tokenizer.vocab_size - ((n_action_bins or 256) + 1))

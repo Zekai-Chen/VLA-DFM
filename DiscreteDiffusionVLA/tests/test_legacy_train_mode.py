@@ -45,7 +45,7 @@ def _image_transform(_img):
 
 def test_rlds_batch_transform_legacy_action_string_masking():
     tok = _DummyTokenizer()
-    action_tokenizer = ActionTokenizer(tok, bins=8, legacy_bins=True, action_vocab_anchor="vocab_size")
+    action_tokenizer = ActionTokenizer(tok, bins=256, legacy_bins=True, action_vocab_anchor="legacy")
     transform = RLDSBatchTransform(
         action_tokenizer,
         tok,
@@ -82,3 +82,39 @@ def test_legacy_action_mask_fallback():
     next_mask = get_next_actions_mask(token_ids)
     assert int(current_mask.sum().item()) == ACTION_DIM
     assert int(next_mask.sum().item()) == 0
+
+
+def test_legacy_train_stamps_config():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    root = Path(__file__).resolve().parents[1]
+    finetune_path = root / "vla-scripts" / "finetune.py"
+    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
+    finetune = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(finetune)
+    apply_legacy_dd_overrides = finetune.apply_legacy_dd_overrides
+
+    cfg = SimpleNamespace(legacy_train_mode=True)
+    model_config = SimpleNamespace(
+        n_action_bins=256,
+        legacy_train_mode=False,
+        legacy_eval_mode=False,
+        action_vocab_anchor="pad",
+        action_token_begin_idx=None,
+    )
+
+    class _Proc:
+        def __init__(self, vocab_size: int):
+            self.tokenizer = SimpleNamespace(vocab_size=vocab_size)
+
+    processor = _Proc(vocab_size=ACTION_TOKEN_BEGIN_IDX + 257)
+
+    apply_legacy_dd_overrides(cfg, model_config, processor)
+
+    assert model_config.legacy_train_mode is True
+    assert model_config.legacy_eval_mode is True
+    assert model_config.action_vocab_anchor == "legacy"
+    assert model_config.action_token_begin_idx == ACTION_TOKEN_BEGIN_IDX
