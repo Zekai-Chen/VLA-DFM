@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 from types import SimpleNamespace
 
@@ -95,9 +96,13 @@ def test_legacy_train_stamps_config():
     finetune = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(finetune)
-    apply_legacy_dd_overrides = finetune.apply_legacy_dd_overrides
+    apply_legacy_tokenization_overrides = finetune.apply_legacy_tokenization_overrides
 
-    cfg = SimpleNamespace(legacy_train_mode=True)
+    cfg = SimpleNamespace(
+        legacy_train_mode=True,
+        legacy_dfm_mode=False,
+        use_discrete_flow_matching=False,
+    )
     model_config = SimpleNamespace(
         n_action_bins=256,
         legacy_train_mode=False,
@@ -112,7 +117,70 @@ def test_legacy_train_stamps_config():
 
     processor = _Proc(vocab_size=ACTION_TOKEN_BEGIN_IDX + 257)
 
-    apply_legacy_dd_overrides(cfg, model_config, processor)
+    apply_legacy_tokenization_overrides(cfg, model_config, processor, legacy_tokenization_mode=True)
+
+    assert model_config.legacy_train_mode is True
+    assert model_config.legacy_eval_mode is True
+    assert model_config.action_vocab_anchor == "legacy"
+    assert model_config.action_token_begin_idx == ACTION_TOKEN_BEGIN_IDX
+
+
+def test_legacy_dfm_mode_requires_dfm():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    root = Path(__file__).resolve().parents[1]
+    finetune_path = root / "vla-scripts" / "finetune.py"
+    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
+    finetune = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(finetune)
+    resolve_legacy_tokenization_mode = finetune.resolve_legacy_tokenization_mode
+
+    cfg = SimpleNamespace(
+        use_discrete_diffusion=False,
+        use_discrete_flow_matching=False,
+        legacy_train_mode=None,
+        legacy_dfm_mode=True,
+    )
+    with pytest.raises(ValueError):
+        resolve_legacy_tokenization_mode(cfg)
+
+
+def test_legacy_dfm_action_range():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    root = Path(__file__).resolve().parents[1]
+    finetune_path = root / "vla-scripts" / "finetune.py"
+    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
+    finetune = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(finetune)
+    apply_legacy_tokenization_overrides = finetune.apply_legacy_tokenization_overrides
+
+    cfg = SimpleNamespace(
+        legacy_train_mode=False,
+        legacy_dfm_mode=True,
+        use_discrete_flow_matching=True,
+    )
+    model_config = SimpleNamespace(
+        n_action_bins=256,
+        legacy_train_mode=False,
+        legacy_eval_mode=False,
+        action_vocab_anchor="pad",
+        action_token_begin_idx=None,
+    )
+
+    class _Proc:
+        def __init__(self, vocab_size: int, mask_token_id: int):
+            self.tokenizer = SimpleNamespace(vocab_size=vocab_size, mask_token_id=mask_token_id)
+
+    processor = _Proc(vocab_size=ACTION_TOKEN_BEGIN_IDX + 257, mask_token_id=32001)
+
+    apply_legacy_tokenization_overrides(cfg, model_config, processor, legacy_tokenization_mode=True)
 
     assert model_config.legacy_train_mode is True
     assert model_config.legacy_eval_mode is True

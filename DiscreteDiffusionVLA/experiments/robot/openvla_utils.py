@@ -332,9 +332,15 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     user_anchor = getattr(cfg, "action_vocab_anchor", None)
     user_begin = getattr(cfg, "action_token_begin_idx", None)
     legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
+    use_discrete_flow_matching = getattr(cfg, "use_discrete_flow_matching", False)
 
-    # Auto-enable legacy eval if checkpoint was trained in legacy mode.
-    if not legacy_eval_mode and raw_vla_cfg:
+    # Auto-enable legacy eval for DFM if checkpoint explicitly requests it.
+    if use_discrete_flow_matching and (not legacy_eval_mode) and raw_vla_cfg and raw_vla_cfg.get("legacy_eval_mode"):
+        legacy_eval_mode = True
+        cfg.legacy_eval_mode = True
+        print("[legacy_dfm_eval] forcing legacy_eval_mode=True from checkpoint config")
+    # Auto-enable legacy eval if checkpoint was trained in legacy mode (general case).
+    elif not legacy_eval_mode and raw_vla_cfg:
         if raw_vla_cfg.get("legacy_train_mode") or raw_vla_cfg.get("legacy_eval_mode"):
             legacy_eval_mode = True
             cfg.legacy_eval_mode = True
