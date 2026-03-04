@@ -24,6 +24,8 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
+from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.action_vocab import resolve_action_vocab
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -990,6 +992,41 @@ def get_vla_action(
     with torch.inference_mode():
         debug = None
         legacy_mode = getattr(cfg, "legacy_eval_mode", False)
+        if use_discrete_flow_matching:
+            n_bins = int(getattr(vla.config, "n_action_bins", 256))
+            anchor = getattr(vla.config, "action_vocab_anchor", "pad")
+            begin_override = getattr(vla.config, "action_token_begin_idx", None)
+            tokenizer_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor, begin_override)
+            model_begin, model_end, _ = vla._action_vocab_range()
+            print(
+                "[dfm_vocab_eval] "
+                f"anchor={anchor} begin={tokenizer_range.begin} end={tokenizer_range.end} "
+                f"pad_id={tokenizer_range.pad_token_id} vocab_size={tokenizer_range.vocab_size}"
+            )
+            print(
+                "[dfm_vocab_eval] "
+                f"model_range=[{model_begin}, {model_end}) "
+                f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+            )
+            if model_begin != tokenizer_range.begin or model_end != tokenizer_range.end:
+                raise RuntimeError(
+                    "DFM action vocab mismatch: "
+                    f"model_range=[{model_begin}, {model_end}) "
+                    f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+                )
+            # Build tokenizer to validate derived begin/end matches action tokenizer expectation.
+            action_tokenizer = ActionTokenizer(
+                processor.tokenizer,
+                bins=n_bins,
+                action_vocab_anchor=anchor,
+                action_token_begin_idx=begin_override,
+            )
+            if action_tokenizer.action_token_begin_idx != tokenizer_range.begin:
+                raise RuntimeError(
+                    "DFM action vocab mismatch: "
+                    f"tokenizer_begin={action_tokenizer.action_token_begin_idx} "
+                    f"config_begin={tokenizer_range.begin}"
+                )
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
             if legacy_mode:
