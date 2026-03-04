@@ -46,6 +46,7 @@ class VLAConfig(ChoiceRegistry):
     warmup_ratio: float                             # Fraction of Steps to Warmup (for warmup LR schedulers)
 
     train_strategy: str                             # Train Strategy (default "fsdp-full-shard")
+    legacy_train_mode: bool = True                  # Default to legacy VLA prompt/tokenization/masks (EVAL parity)
 
     # Enable Gradient/Activation Checkpointing (for the LLM Backbone)
     enable_gradient_checkpointing: bool = True      # Enable Gradient/Activation Checkpointing during Training
