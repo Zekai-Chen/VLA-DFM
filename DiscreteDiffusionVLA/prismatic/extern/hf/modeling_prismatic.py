@@ -466,7 +466,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if n_bins is None:
             raise ValueError("n_action_bins must be set on config or via bin_centers.")
         n_bins = int(n_bins)
-        if getattr(self.config, "legacy_eval_mode", False):
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
             action_begin = int(self.vocab_size - (self.bin_centers.shape[0] + 1))
             action_end = int(self.vocab_size)
             return action_begin, action_end, int(self.bin_centers.shape[0] + 1)
@@ -492,7 +492,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _validate_action_vocab(self) -> None:
         """Validate that special tokens do not overlap action bins."""
-        if getattr(self.config, "legacy_eval_mode", False):
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
             return
         if not hasattr(self.config, "n_action_bins") and not hasattr(self, "bin_centers"):
             return
@@ -510,9 +510,13 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""
-        action_begin, action_end, _ = self._action_vocab_range()
-        current_action_mask = get_current_action_mask(labels, action_begin, action_end)
-        next_actions_mask = get_next_actions_mask(labels, action_begin, action_end)
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            current_action_mask = get_current_action_mask(labels)
+            next_actions_mask = get_next_actions_mask(labels)
+        else:
+            action_begin, action_end, _ = self._action_vocab_range()
+            current_action_mask = get_current_action_mask(labels, action_begin, action_end)
+            next_actions_mask = get_next_actions_mask(labels, action_begin, action_end)
         all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
         return all_actions_mask
 
@@ -1399,8 +1403,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         super().__init__(config)
         self.norm_stats = config.norm_stats
 
-        # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
+        # Compute action bins (legacy DD uses n_bins edges, not n_bins+1)
+        legacy_bins = getattr(config, "legacy_train_mode", False) or getattr(config, "legacy_eval_mode", False)
+        if legacy_bins:
+            self.bins = np.linspace(-1, 1, config.n_action_bins)
+        else:
+            self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # check if config has topk_filter_thres
@@ -1438,8 +1446,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        action_begin, _, _ = self._action_vocab_range()
-        ARBITRARY_ACTION_TOKEN_IDX = action_begin
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        else:
+            action_begin, _, _ = self._action_vocab_range()
+            ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
@@ -2222,8 +2233,12 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
         super().__init__(config)
         self.norm_stats = config.norm_stats
 
-        # Compute action bins
-        self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
+        # Compute action bins (legacy DD uses n_bins edges, not n_bins+1)
+        legacy_bins = getattr(config, "legacy_train_mode", False) or getattr(config, "legacy_eval_mode", False)
+        if legacy_bins:
+            self.bins = np.linspace(-1, 1, config.n_action_bins)
+        else:
+            self.bins = np.linspace(-1, 1, config.n_action_bins + 1)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         # Compute vocab size for de-tokenization -- revert added "multiple of"
@@ -2255,8 +2270,11 @@ class DiscreteDiffusionForActionPrediction(PrismaticForConditionalGeneration):
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
         # Extend labels tensor with fake action labels
-        action_begin, _, _ = self._action_vocab_range()
-        ARBITRARY_ACTION_TOKEN_IDX = action_begin
+        if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
+            ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+        else:
+            action_begin, _, _ = self._action_vocab_range()
+            ARBITRARY_ACTION_TOKEN_IDX = action_begin
         labels_extension = (
             torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
             * ARBITRARY_ACTION_TOKEN_IDX
