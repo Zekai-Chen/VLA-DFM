@@ -333,6 +333,13 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     user_begin = getattr(cfg, "action_token_begin_idx", None)
     legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
 
+    # Auto-enable legacy eval if checkpoint was trained in legacy mode.
+    if not legacy_eval_mode and raw_vla_cfg:
+        if raw_vla_cfg.get("legacy_train_mode") or raw_vla_cfg.get("legacy_eval_mode"):
+            legacy_eval_mode = True
+            cfg.legacy_eval_mode = True
+            print("[legacy_eval] enabling legacy_eval_mode from checkpoint config")
+
     override_anchor = user_anchor
     override_begin = user_begin
 
