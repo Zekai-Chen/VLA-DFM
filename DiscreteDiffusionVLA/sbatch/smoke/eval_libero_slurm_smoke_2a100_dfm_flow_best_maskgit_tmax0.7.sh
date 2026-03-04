@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:1
 #SBATCH --nodes=1
-#SBATCH --mem=120G
+#SBATCH --mem=60G
 #SBATCH --time=47:00:00
 #SBATCH --job-name=openvla-eval-dfm-maskgit-tmax0.7
 #SBATCH --output=logs/openvla_eval_dfm_maskgit_tmax0.7_%j.out
