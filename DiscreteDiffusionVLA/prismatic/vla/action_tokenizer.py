@@ -46,17 +46,14 @@ class ActionTokenizer:
         self.action_vocab_anchor = action_vocab_anchor
         self.legacy_bins = legacy_bins
 
-        # Legacy mapping: old eval used vocab_size anchoring + n_bins edges (not n_bins+1).
+        # Legacy mapping: old eval used n_bins edges (not n_bins+1).
         if legacy_bins:
             self.bins = np.linspace(min_action, max_action, self.n_bins)
             self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
-            self.action_token_end_idx = int(self.tokenizer.vocab_size)
-            self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
-            return
-
-        # Create Uniform Bins + Compute Bin Centers
-        self.bins = np.linspace(min_action, max_action, self.n_bins + 1)
-        self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+        else:
+            # Create Uniform Bins + Compute Bin Centers
+            self.bins = np.linspace(min_action, max_action, self.n_bins + 1)
+            self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
         if action_token_begin_idx is not None:
             self.action_token_begin_idx = int(action_token_begin_idx)

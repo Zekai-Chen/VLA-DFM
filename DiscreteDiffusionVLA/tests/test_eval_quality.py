@@ -85,13 +85,20 @@ def test_action_tokenizer_legacy_anchor_uses_constant():
 
 def test_action_tokenizer_legacy_bins_vocab_anchor():
     tok = _DummyTokenizer(vocab_size=32000, pad_token_id=31990)
-    action_tokenizer = ActionTokenizer(tok, bins=8, legacy_bins=True)
+    action_tokenizer = ActionTokenizer(tok, bins=8, legacy_bins=True, action_vocab_anchor="vocab_size")
     assert action_tokenizer.action_token_end_idx == 32000
     assert action_tokenizer.action_token_begin_idx == 32000 - 8
     assert len(action_tokenizer.bin_centers) == 7
     token_ids = action_tokenizer.encode_actions_to_token_ids(np.array([-1.0, 0.0, 1.0]))
     assert token_ids.min() >= (32000 - 8)
     assert token_ids.max() <= 31999
+
+
+def test_action_tokenizer_legacy_bins_pad_anchor():
+    tok = _DummyTokenizer(vocab_size=32000, pad_token_id=31990)
+    action_tokenizer = ActionTokenizer(tok, bins=8, legacy_bins=True, action_vocab_anchor="pad")
+    assert action_tokenizer.action_token_end_idx == 31990
+    assert action_tokenizer.action_token_begin_idx == 31990 - 8
 
 
 def test_dfm_maskgit_resolves_all_masks():
