@@ -50,8 +50,17 @@ class ActionTokenizer:
         if legacy_bins:
             self.bins = np.linspace(min_action, max_action, self.n_bins)
             self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+            self.action_vocab_anchor = "legacy"
             self.action_token_end_idx = int(self.tokenizer.vocab_size)
-            self.action_token_begin_idx = int(self.action_token_end_idx - (self.n_bins + 1))
+            expected_begin = int(self.action_token_end_idx - (self.n_bins + 1))
+            if expected_begin != int(ACTION_TOKEN_BEGIN_IDX):
+                raise ValueError(
+                    "legacy_bins requires ACTION_TOKEN_BEGIN_IDX alignment. "
+                    f"Expected begin={expected_begin} from vocab_size and n_bins, "
+                    f"but ACTION_TOKEN_BEGIN_IDX={ACTION_TOKEN_BEGIN_IDX}. "
+                    "Update the tokenizer/vocab or constants for legacy DD."
+                )
+            self.action_token_begin_idx = int(ACTION_TOKEN_BEGIN_IDX)
             return
 
         # Create Uniform Bins + Compute Bin Centers
