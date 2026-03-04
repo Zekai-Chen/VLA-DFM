@@ -69,7 +69,7 @@ export WANDB_NAME="openvla_ft_smoke_3k_dd_align_${SLURM_JOBID:-local}"
 
 # --- Job params (adjust paths if needed) ---
 BASE_DIR="/scratch/ywn1043/VLA-DFM"
-VLA_PATH="${BASE_DIR}/models/openvla-7b"
+VLA_PATH="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_0315"
 DATA_ROOT="${BASE_DIR}/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
 RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-align-dd"
