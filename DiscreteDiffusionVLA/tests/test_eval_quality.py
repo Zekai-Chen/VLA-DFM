@@ -1,5 +1,20 @@
+import importlib.util
+import sys
+from pathlib import Path
+
+import numpy as np
 import torch
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+_PROMPT_UTILS = ROOT / "prismatic" / "vla" / "prompt_utils.py"
+spec = importlib.util.spec_from_file_location("prompt_utils", _PROMPT_UTILS)
+prompt_utils = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(prompt_utils)
+_build_vla_prompt = prompt_utils.build_vla_prompt
 from prismatic.discrete_flow.dfm_decode import dfm_decode
 from prismatic.training.train_utils import get_current_action_mask, get_next_actions_mask
 from prismatic.vla.action_tokenizer import ActionTokenizer
@@ -27,6 +42,12 @@ def _dummy_tokens_to_logits(cur: torch.LongTensor):
     logits[..., 1] = 10.0
     hidden = torch.zeros(B, L, 4)
     return logits, hidden
+
+
+def test_legacy_prompt_string():
+    prompt = _build_vla_prompt("Pick up the mug", legacy=True)
+    assert prompt == "In: What action should the robot take to pick up the mug?\nOut:"
+    assert "</s>" not in prompt
 
 
 def test_action_masks_partition_action_tokens():
@@ -60,6 +81,17 @@ def test_action_tokenizer_legacy_anchor_uses_constant():
     action_tokenizer = ActionTokenizer(tok, bins=8, action_vocab_anchor="legacy")
     assert action_tokenizer.action_token_begin_idx == ACTION_TOKEN_BEGIN_IDX
     assert action_tokenizer.action_token_end_idx == ACTION_TOKEN_BEGIN_IDX + 8
+
+
+def test_action_tokenizer_legacy_bins_vocab_anchor():
+    tok = _DummyTokenizer(vocab_size=32000, pad_token_id=31990)
+    action_tokenizer = ActionTokenizer(tok, bins=8, legacy_bins=True)
+    assert action_tokenizer.action_token_end_idx == 32000
+    assert action_tokenizer.action_token_begin_idx == 32000 - 8
+    assert len(action_tokenizer.bin_centers) == 7
+    token_ids = action_tokenizer.encode_actions_to_token_ids(np.array([-1.0, 0.0, 1.0]))
+    assert token_ids.min() >= (32000 - 8)
+    assert token_ids.max() <= 31999
 
 
 def test_dfm_maskgit_resolves_all_masks():

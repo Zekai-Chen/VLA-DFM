@@ -7,7 +7,11 @@ Extension class; wraps base LLM/VLM tokenizer with logic to discretize and token
 from typing import List, Optional, Union
 
 import numpy as np
-from transformers import PreTrainedTokenizerBase
+try:
+    from transformers import PreTrainedTokenizerBase
+except ImportError:  # pragma: no cover - optional dependency in tests
+    class PreTrainedTokenizerBase:  # type: ignore
+        pass
 
 from prismatic.vla.constants import ACTION_TOKEN_BEGIN_IDX
 
@@ -22,6 +26,7 @@ class ActionTokenizer:
         action_vocab_anchor: str = "pad",
         action_token_end_idx: Optional[int] = None,
         action_token_begin_idx: Optional[int] = None,
+        legacy_bins: bool = False,
     ) -> None:
         """
         Discretizes continuous robot actions into N bins per dimension and maps to the least used tokens.
@@ -39,6 +44,15 @@ class ActionTokenizer:
         self.min_action = min_action
         self.max_action = max_action
         self.action_vocab_anchor = action_vocab_anchor
+        self.legacy_bins = legacy_bins
+
+        # Legacy mapping: old eval used vocab_size anchoring + n_bins edges (not n_bins+1).
+        if legacy_bins:
+            self.bins = np.linspace(min_action, max_action, self.n_bins)
+            self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+            self.action_token_end_idx = int(self.tokenizer.vocab_size)
+            self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
+            return
 
         # Create Uniform Bins + Compute Bin Centers
         self.bins = np.linspace(min_action, max_action, self.n_bins + 1)

@@ -24,13 +24,13 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 from prismatic.models.action_heads import DiffusionActionHead, L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
     ACTION_TOKEN_BEGIN_IDX,
     STOP_INDEX,
 )
+from prismatic.vla.prompt_utils import build_vla_prompt as _build_vla_prompt
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
 # Apply JSON numpy patch for serialization
@@ -327,15 +327,29 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     elif isinstance(raw_cfg, dict):
         raw_vla_cfg = raw_cfg
 
-    override_anchor = getattr(cfg, "action_vocab_anchor", None)
-    override_begin = getattr(cfg, "action_token_begin_idx", None)
-    if override_anchor is None and override_begin is None and raw_vla_cfg and "action_vocab_anchor" not in raw_vla_cfg:
+    user_anchor = getattr(cfg, "action_vocab_anchor", None)
+    user_begin = getattr(cfg, "action_token_begin_idx", None)
+    legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
+
+    override_anchor = user_anchor
+    override_begin = user_begin
+
+    if legacy_eval_mode:
+        if override_anchor is None:
+            override_anchor = "vocab_size"
+            print("[legacy_eval] forcing action_vocab_anchor='vocab_size'")
+        if override_begin is None and raw_vla_cfg and "action_token_begin_idx" in raw_vla_cfg:
+            print(
+                "[legacy_eval] ignoring checkpoint action_token_begin_idx; "
+                "use --action_token_begin_idx to override explicitly."
+            )
+    elif override_anchor is None and override_begin is None and raw_vla_cfg and "action_vocab_anchor" not in raw_vla_cfg:
         override_anchor = "legacy"
         raw_begin = raw_vla_cfg.get("action_token_begin_idx")
         override_begin = int(raw_begin) if raw_begin is not None else ACTION_TOKEN_BEGIN_IDX
         print(
             "INFO: action_vocab_anchor missing in checkpoint config.json; "
-            "defaulting to legacy action token range."
+            f"defaulting to {override_anchor} action token range."
         )
     if raw_vla_cfg and override_anchor is not None:
         raw_anchor = raw_vla_cfg.get("action_vocab_anchor")
@@ -367,6 +381,8 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         config.action_vocab_anchor = override_anchor
     if override_begin is not None:
         config.action_token_begin_idx = int(override_begin)
+    elif legacy_eval_mode and hasattr(config, "action_token_begin_idx"):
+        config.action_token_begin_idx = None
 
     # Load the model
     vla = AutoModelForVision2Seq.from_pretrained(
@@ -379,6 +395,34 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
+
+    # Legacy eval: override action binning to match older checkpoints (n_bins edges, vocab-anchored).
+    if getattr(cfg, "legacy_eval_mode", False):
+        n_bins = getattr(vla.config, "n_action_bins", None)
+        if n_bins is None:
+            bins = getattr(vla, "bins", None)
+            centers = getattr(vla, "bin_centers", None)
+            if bins is not None:
+                bins_len = int(len(bins))
+                if centers is not None:
+                    centers_len = int(len(centers))
+                    if bins_len == centers_len + 1:
+                        n_bins = centers_len
+                    elif bins_len == centers_len:
+                        n_bins = bins_len
+                    else:
+                        n_bins = bins_len
+                else:
+                    n_bins = bins_len
+            elif centers is not None:
+                n_bins = int(len(centers))
+        if n_bins is not None:
+            n_bins = int(n_bins)
+            vla.bins = np.linspace(-1, 1, n_bins)
+            vla.bin_centers = (vla.bins[:-1] + vla.bins[1:]) / 2.0
+            print("[legacy_eval] using legacy action binning (n_bins edges)")
+        else:
+            print("[legacy_eval] WARNING: n_action_bins missing; cannot apply legacy binning override.")
 
     # Log logic fingerprints + file paths for debugging
     try:
@@ -514,7 +558,7 @@ def get_processor(cfg: Any) -> AutoProcessor:
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
 
 
-def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> None:
+def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer, require_mask_token: bool = True) -> None:
     """Ensure tokenizer and model embeddings are aligned (fail fast on mismatches)."""
     vocab_len = len(tokenizer)
     emb_n = model.get_input_embeddings().num_embeddings
@@ -537,14 +581,19 @@ def validate_model_tokenizer_alignment(model: torch.nn.Module, tokenizer) -> Non
     if out_n is not None and out_n != emb_n:
         raise RuntimeError(f"Output embeddings != input embeddings: emb={emb_n}, out={out_n}")
 
-    if tokenizer.pad_token_id is None or tokenizer.mask_token_id is None:
+    if tokenizer.pad_token_id is None:
+        raise RuntimeError(f"Tokenizer missing pad token: pad_token_id={tokenizer.pad_token_id}")
+    if tokenizer.pad_token_id >= vocab_len:
         raise RuntimeError(
-            f"Tokenizer missing special tokens: pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
+            f"Special token id out of range: len(tokenizer)={vocab_len}, pad_token_id={tokenizer.pad_token_id}"
         )
-    if tokenizer.pad_token_id >= vocab_len or tokenizer.mask_token_id >= vocab_len:
-        raise RuntimeError(
-            f"Special token ids out of range: len(tokenizer)={vocab_len}, pad_token_id={tokenizer.pad_token_id}, mask_token_id={tokenizer.mask_token_id}"
-        )
+    if require_mask_token:
+        if tokenizer.mask_token_id is None:
+            raise RuntimeError(f"Tokenizer missing mask token: mask_token_id={tokenizer.mask_token_id}")
+        if tokenizer.mask_token_id >= vocab_len:
+            raise RuntimeError(
+                f"Special token id out of range: len(tokenizer)={vocab_len}, mask_token_id={tokenizer.mask_token_id}"
+            )
 
 
 def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioProjector:
@@ -919,9 +968,20 @@ def get_vla_action(
     """
     with torch.inference_mode():
         debug = None
+        legacy_mode = getattr(cfg, "legacy_eval_mode", False)
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
-            raise RuntimeError("mask_token_id missing in tokenizer — checkpoint tokenizer is incompatible with DFM.")
+            if legacy_mode:
+                processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+                if hasattr(vla, "config") and hasattr(vla.config, "set_mask_token_id"):
+                    vla.config.set_mask_token_id(processor.tokenizer.mask_token_id)
+                if hasattr(vla, "mask_token_id"):
+                    vla.mask_token_id = processor.tokenizer.mask_token_id
+                if hasattr(vla, "config") and hasattr(vla.config, "use_mask_token"):
+                    vla.config.use_mask_token = True
+                print("[legacy_eval] added missing mask token to tokenizer/config for eval compatibility.")
+            else:
+                raise RuntimeError("mask_token_id missing in tokenizer — checkpoint tokenizer is incompatible with DFM.")
         was_dfm_trained = getattr(vla.config, "use_discrete_flow_matching", False) if hasattr(vla, "config") else False
         if use_discrete_flow_matching and hasattr(vla, "config") and hasattr(vla.config, "use_discrete_flow_matching"):
             vla.config.use_discrete_flow_matching = True
@@ -945,24 +1005,21 @@ def get_vla_action(
         primary_image = all_images.pop(0)
 
         # Build VLA prompt to mirror training-time formatting
-        prompt_builder = PurePromptBuilder("openvla")
-        prompt_builder.add_turn("human", f"What action should the robot take to {task_label.lower()}?")
-        prompt_builder.add_turn("gpt", "")
-        prompt = prompt_builder.get_prompt()
-        # Training drops the terminal EOS; keep the trailing space before it.
-        if prompt.endswith("</s>"):
-            prompt = prompt[: -len("</s>")]
+        prompt = _build_vla_prompt(task_label, legacy=legacy_mode)
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
-        inputs = _strip_eos_from_inputs(inputs)
+        if not legacy_mode:
+            inputs = _strip_eos_from_inputs(inputs)
 
         # Process additional wrist images if any
         if all_images:
             all_wrist_inputs = [
-                _strip_eos_from_inputs(processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16))
+                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16)
                 for image_wrist in all_images
             ]
+            if not legacy_mode:
+                all_wrist_inputs = [_strip_eos_from_inputs(wrist) for wrist in all_wrist_inputs]
             # Concatenate all images
             primary_pixel_values = inputs["pixel_values"]
             all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]

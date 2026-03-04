@@ -104,6 +104,7 @@ class GenerateConfig:
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
     sync_model_logic: bool = True                    # If True, overwrite checkpoint logic with repo code
+    legacy_eval_mode: bool = False                   # If True, use legacy prompt/tokenization for old checkpoints
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)
@@ -248,7 +249,8 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
-        validate_model_tokenizer_alignment(model, processor.tokenizer)
+        require_mask = (cfg.use_discrete_diffusion or cfg.use_discrete_flow_matching) and not cfg.legacy_eval_mode
+        validate_model_tokenizer_alignment(model, processor.tokenizer, require_mask_token=require_mask)
         check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
@@ -680,6 +682,7 @@ def run_eval_probe(cfg: GenerateConfig, model, processor, proprio_projector, tas
         bins=n_action_bins,
         action_vocab_anchor=anchor,
         action_token_begin_idx=begin_override,
+        legacy_bins=cfg.legacy_eval_mode,
     )
     use_wrist_image = cfg.num_images_in_input > 1
     batch_transform = RLDSBatchTransform(
@@ -1272,6 +1275,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Set random seed
     set_seed_everywhere(cfg.seed)
 
+    legacy_forced_sync = False
+    if cfg.legacy_eval_mode and cfg.sync_model_logic:
+        cfg.sync_model_logic = False
+        legacy_forced_sync = True
+
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
@@ -1280,6 +1288,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     # Setup logging
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+    if cfg.legacy_eval_mode:
+        if legacy_forced_sync:
+            log_message("[legacy_eval] forcing sync_model_logic=False for legacy mode", log_file)
+        else:
+            log_message(f"[legacy_eval] legacy_eval_mode=True sync_model_logic={cfg.sync_model_logic}", log_file)
     _log_eval_banner(cfg, log_file)
     _log_action_vocab_summary(model, processor, log_file)
     _log_dfm_params(cfg, model, log_file)
@@ -1296,6 +1309,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             bins=n_action_bins,
             action_vocab_anchor=anchor,
             action_token_begin_idx=begin_override,
+            legacy_bins=cfg.legacy_eval_mode,
         )
         action_stats = model.get_action_stats(cfg.unnorm_key)
     gripper_audit_writer = None
