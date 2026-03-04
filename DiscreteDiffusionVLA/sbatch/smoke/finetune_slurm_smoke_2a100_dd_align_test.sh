@@ -83,16 +83,13 @@ SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
-LEGACY_TRAIN_MODE=${LEGACY_TRAIN_MODE:-}
+LEGACY_TRAIN_MODE="True"
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
 
 
 # --- Launch (PyTorch DDP) ---
-LEGACY_ARGS=()
-if [ -n "${LEGACY_TRAIN_MODE}" ]; then
-  LEGACY_ARGS+=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
-fi
+LEGACY_ARGS=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
 torchrun --standalone --nnodes 1 --nproc-per-node ${NPROC} vla-scripts/finetune.py \
   --vla_path "${VLA_PATH}" \
   --data_root_dir "${DATA_ROOT}" \
