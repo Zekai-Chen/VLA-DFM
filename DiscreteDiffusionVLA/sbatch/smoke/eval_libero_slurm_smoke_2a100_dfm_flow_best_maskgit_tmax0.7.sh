@@ -105,18 +105,17 @@ TOTAL_SLOTS=$((NUM_GPUS * MAX_PER_GPU))
 GPUS=()
 for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
 
-# Evaluate a small set of checkpoints
+# Single-checkpoint eval (no step subfolders)
 STEPS=(
-  3000
+  final
 )
 
 # --- Preflight: validate checkpoint config matches DFM eval expectations ---
 FIRST_STEP="${STEPS[0]}"
-CKPT_PATH="${CHECKPOINT_ROOT}--${FIRST_STEP}_chkpt"
-if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
-  CKPT_PATH="${CHECKPOINT_ROOT}"
-elif [[ -d "${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt" ]]; then
-  CKPT_PATH="${CHECKPOINT_ROOT}/${FIRST_STEP}_chkpt"
+CKPT_PATH="${CHECKPOINT_ROOT}"
+if [[ ! -d "${CKPT_PATH}" || ! -f "${CKPT_PATH}/config.json" ]]; then
+  echo "ERROR: Expected a single checkpoint directory with config.json at ${CKPT_PATH}" 1>&2
+  exit 1
 fi
 export CKPT_PATH
 
@@ -214,12 +213,7 @@ start_job() {
   local GPU_INDEX=$(( SLOT / MAX_PER_GPU ))
   local GPU=${GPUS[$GPU_INDEX]}
 
-  local CKPT_PATH="${CHECKPOINT_ROOT}--${STEP}_chkpt"
-  if [[ -d "${CHECKPOINT_ROOT}" && -f "${CHECKPOINT_ROOT}/config.json" ]]; then
-    CKPT_PATH="${CHECKPOINT_ROOT}"
-  elif [[ -d "${CHECKPOINT_ROOT}/${STEP}_chkpt" ]]; then
-    CKPT_PATH="${CHECKPOINT_ROOT}/${STEP}_chkpt"
-  fi
+  local CKPT_PATH="${CHECKPOINT_ROOT}"
 
   local EXTRA_ARGS=()
   if [[ -n "${FORCE_GRIPPER_VALUE}" ]]; then
