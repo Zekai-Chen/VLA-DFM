@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import tqdm
+import numpy as np
 from accelerate import PartialState
 from huggingface_hub import HfApi, snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model
@@ -50,6 +51,7 @@ from prismatic.training.train_utils import (
 )
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.action_vocab import resolve_action_vocab, validate_action_vocab_alignment
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -1012,6 +1014,19 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     _apply_finetune_cfg_to_model_config(cfg, model_config, processor)
 
+    # For DFM, stamp explicit action vocab range into config to avoid eval mismatches.
+    if cfg.use_discrete_flow_matching:
+        n_bins = int(getattr(model_config, "n_action_bins", 256))
+        anchor = getattr(model_config, "action_vocab_anchor", "pad")
+        action_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor)
+        model_config.action_vocab_anchor = anchor
+        model_config.action_token_begin_idx = action_range.begin
+        print(
+            "[dfm_vocab] "
+            f"anchor={anchor} begin={action_range.begin} end={action_range.end} "
+            f"pad_id={action_range.pad_token_id} vocab_size={action_range.vocab_size}"
+        )
+
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
         config=model_config,  # Pass the updated config
@@ -1022,6 +1037,10 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+    if cfg.use_discrete_flow_matching:
+        # Keep runtime config consistent with stamped vocab range.
+        vla.config.action_vocab_anchor = model_config.action_vocab_anchor
+        vla.config.action_token_begin_idx = model_config.action_token_begin_idx
 
     # LoRA setup
     if cfg.use_lora:
@@ -1156,6 +1175,23 @@ def finetune(cfg: FinetuneConfig) -> None:
             action_vocab_anchor=action_vocab_anchor,
             action_token_begin_idx=action_token_begin_idx,
         )
+    if cfg.use_discrete_flow_matching:
+        # Fail fast on action vocab misalignment.
+        n_bins = int(getattr(vla.config, "n_action_bins", n_action_bins or 256))
+        anchor = getattr(vla.config, "action_vocab_anchor", "pad")
+        begin_override = getattr(vla.config, "action_token_begin_idx", None)
+        action_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor, begin_override)
+        if action_tokenizer.action_token_begin_idx != action_range.begin:
+            raise ValueError(
+                "DFM action vocab mismatch: "
+                f"tokenizer_begin={action_tokenizer.action_token_begin_idx} "
+                f"config_begin={action_range.begin} "
+                f"anchor={anchor}"
+            )
+        # Validate encoded tokens fall within range.
+        sample_actions = np.zeros((NUM_ACTIONS_CHUNK, ACTION_DIM), dtype=np.float32)
+        sample_ids = action_tokenizer.encode_actions_to_token_ids(sample_actions)
+        validate_action_vocab_alignment(action_range, sample_ids.tolist())
 
     # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
     #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.
