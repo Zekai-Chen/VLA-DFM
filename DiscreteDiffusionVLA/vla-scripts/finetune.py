@@ -86,7 +86,7 @@ class FinetuneConfig:
 
     use_discrete_diffusion: bool = True             # If True, uses discrete diffusion (instead of continuous) for action generation
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching for action generation
-    legacy_train_mode: bool = False                 # If True, use legacy prompt/tokenization/masks (discrete diffusion only)
+    legacy_train_mode: Optional[bool] = None        # If True, use legacy prompt/tokenization/masks (discrete diffusion only)
 
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
@@ -929,7 +929,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_discrete_flow_matching and (cfg.use_l1_regression or cfg.use_diffusion)), (
         "DFM is not compatible with continuous action heads (L1 regression or diffusion)."
     )
-    if cfg.legacy_train_mode and not cfg.use_discrete_diffusion:
+    legacy_train_mode_arg = cfg.legacy_train_mode
+    if cfg.legacy_train_mode is None:
+        cfg.legacy_train_mode = bool(cfg.use_discrete_diffusion)
+    elif cfg.legacy_train_mode and not cfg.use_discrete_diffusion:
         raise ValueError("legacy_train_mode is only supported when use_discrete_diffusion=True.")
 
     # Trim trailing forward slash ('/') in VLA path if it exists
@@ -963,7 +966,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"\tACTION_PROPRIO_NORMALIZATION_TYPE: {ACTION_PROPRIO_NORMALIZATION_TYPE}"
     )
     if cfg.legacy_train_mode:
-        print("[legacy_train] enabled: using legacy prompt/tokenization/masks")
+        if legacy_train_mode_arg is None:
+            print("[legacy_train] auto-enabled for discrete diffusion")
+        else:
+            print("[legacy_train] enabled: using legacy prompt/tokenization/masks")
+    elif legacy_train_mode_arg is False:
+        print("[legacy_train] disabled by explicit flag")
 
     # Two options:
     # (1) Base model is on Hugging Face Hub
@@ -1180,9 +1188,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
     if cfg.use_discrete_flow_matching:
         # Fail fast on action vocab misalignment.
-        n_bins = int(getattr(vla.config, "n_action_bins", n_action_bins or 256))
-        anchor = getattr(vla.config, "action_vocab_anchor", "pad")
-        begin_override = getattr(vla.config, "action_token_begin_idx", None)
+        model_config = getattr(model_cfg, "config", None)
+        n_bins = int(getattr(model_config, "n_action_bins", n_action_bins or 256))
+        anchor = getattr(model_config, "action_vocab_anchor", "pad")
+        begin_override = getattr(model_config, "action_token_begin_idx", None)
         action_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor, begin_override)
         if action_tokenizer.action_token_begin_idx != action_range.begin:
             raise ValueError(

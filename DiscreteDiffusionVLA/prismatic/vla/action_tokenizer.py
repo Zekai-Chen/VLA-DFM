@@ -51,7 +51,7 @@ class ActionTokenizer:
             self.bins = np.linspace(min_action, max_action, self.n_bins)
             self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
             self.action_token_end_idx = int(self.tokenizer.vocab_size)
-            self.action_token_begin_idx = int(self.action_token_end_idx - self.n_bins)
+            self.action_token_begin_idx = int(self.action_token_end_idx - (self.n_bins + 1))
             return
 
         # Create Uniform Bins + Compute Bin Centers
