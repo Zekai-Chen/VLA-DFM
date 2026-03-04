@@ -344,27 +344,10 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     override_begin = user_begin
 
     if legacy_eval_mode:
-        if override_anchor is None:
-            pad_id = raw_cfg.get("pad_token_id")
-            if pad_id is None and isinstance(raw_vla_cfg, dict):
-                pad_id = raw_vla_cfg.get("pad_token_id")
-            text_cfg = raw_cfg.get("text_config") if isinstance(raw_cfg.get("text_config"), dict) else {}
-            text_vocab = text_cfg.get("vocab_size")
-            pad_to_multiple_of = raw_cfg.get("pad_to_multiple_of") or (
-                raw_vla_cfg.get("pad_to_multiple_of") if isinstance(raw_vla_cfg, dict) else 0
-            )
-            base_vocab = (
-                int(text_vocab) - int(pad_to_multiple_of)
-                if text_vocab is not None and pad_to_multiple_of
-                else text_vocab
-            )
-            if pad_id is not None and base_vocab is not None and int(pad_id) == int(base_vocab):
-                override_anchor = "pad"
-            elif pad_id is not None and text_vocab is not None and int(pad_id) < int(text_vocab):
-                override_anchor = "pad"
-            else:
-                override_anchor = "vocab_size"
-            print(f"[legacy_eval] forcing action_vocab_anchor='{override_anchor}'")
+        if override_anchor is None and override_begin is None:
+            override_anchor = "legacy"
+            override_begin = int(ACTION_TOKEN_BEGIN_IDX)
+            print("[legacy_eval] forcing action_vocab_anchor='legacy'")
         if override_begin is None and raw_vla_cfg and "action_token_begin_idx" in raw_vla_cfg:
             print(
                 "[legacy_eval] ignoring checkpoint action_token_begin_idx; "
@@ -490,6 +473,12 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     )
     action_begin, action_end, _ = vla._action_vocab_range()
     print(f"[action_vocab] action_range=[{action_begin}, {action_end})")
+    if getattr(cfg, "legacy_eval_mode", False):
+        print(
+            "[legacy_eval] "
+            f"effective_action_range=[{action_begin}, {action_end}) "
+            f"anchor={action_vocab_anchor}"
+        )
 
     # Set number of images in model input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
