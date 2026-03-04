@@ -83,6 +83,7 @@ SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
+# Legacy DD behavior (prompt/tokenization/masks); keep explicit for clarity
 LEGACY_TRAIN_MODE="True"
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
