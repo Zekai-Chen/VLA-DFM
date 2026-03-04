@@ -2,6 +2,7 @@ import numpy as np
 
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.action_vocab import resolve_action_vocab, validate_action_vocab_alignment
+from prismatic.vla.constants import ACTION_TOKEN_BEGIN_IDX
 
 
 class _DummyTokenizer:
@@ -60,3 +61,10 @@ def test_action_vocab_alignment_fail():
         assert "Action token IDs out of range" in str(exc)
     else:
         raise AssertionError("Expected ValueError for out-of-range action token IDs")
+
+
+def test_action_vocab_legacy_anchor():
+    tok = _DummyTokenizer(vocab_size=32010, pad_token_id=32000)
+    action_range = resolve_action_vocab(tok, 8, "legacy")
+    assert action_range.begin == ACTION_TOKEN_BEGIN_IDX
+    assert action_range.end == ACTION_TOKEN_BEGIN_IDX + 8

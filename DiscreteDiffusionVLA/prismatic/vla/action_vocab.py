@@ -11,6 +11,8 @@ from typing import Iterable, Optional, Tuple
 
 import numpy as np
 
+from prismatic.vla.constants import ACTION_TOKEN_BEGIN_IDX
+
 
 @dataclass(frozen=True)
 class ActionVocabRange:
@@ -33,7 +35,10 @@ def resolve_action_vocab(
         begin = int(begin_override)
         end = int(begin + n_bins)
     else:
-        if anchor == "pad":
+        if anchor == "legacy":
+            begin = int(ACTION_TOKEN_BEGIN_IDX)
+            end = int(begin + n_bins)
+        elif anchor == "pad":
             if tokenizer.pad_token_id is None:
                 raise ValueError("tokenizer.pad_token_id must be set when action_vocab_anchor='pad'")
             end = int(tokenizer.pad_token_id)
@@ -41,7 +46,8 @@ def resolve_action_vocab(
             end = int(tokenizer.vocab_size)
         else:
             raise ValueError(f"Unknown action_vocab_anchor: {anchor}")
-        begin = int(end - n_bins)
+        if anchor != "legacy":
+            begin = int(end - n_bins)
 
     return ActionVocabRange(
         begin=begin,
