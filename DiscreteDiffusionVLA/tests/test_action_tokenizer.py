@@ -1,6 +1,7 @@
 import numpy as np
 
 from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.action_vocab import resolve_action_vocab, validate_action_vocab_alignment
 
 
 class _DummyTokenizer:
@@ -36,3 +37,26 @@ def test_action_tokenizer_no_pad_collision():
     tok = _DummyTokenizer(vocab_size=32010, pad_token_id=32000)
     action_tokenizer = ActionTokenizer(tok, bins=16, action_vocab_anchor="pad")
     assert not (action_tokenizer.action_token_begin_idx <= tok.pad_token_id < action_tokenizer.action_token_end_idx)
+
+
+def test_action_vocab_alignment_pass():
+    tok = _DummyTokenizer(vocab_size=32010, pad_token_id=32000)
+    n_bins = 8
+    action_range = resolve_action_vocab(tok, n_bins, "pad")
+    action_tokenizer = ActionTokenizer(tok, bins=n_bins, action_vocab_anchor="pad")
+    assert action_tokenizer.action_token_begin_idx == action_range.begin
+    sample_actions = np.zeros((1, 7), dtype=np.float32)
+    sample_ids = action_tokenizer.encode_actions_to_token_ids(sample_actions)
+    validate_action_vocab_alignment(action_range, sample_ids.tolist())
+
+
+def test_action_vocab_alignment_fail():
+    tok = _DummyTokenizer(vocab_size=32010, pad_token_id=32000)
+    action_range = resolve_action_vocab(tok, 8, "pad")
+    bad_ids = [action_range.begin - 1, action_range.end]
+    try:
+        validate_action_vocab_alignment(action_range, bad_ids)
+    except ValueError as exc:
+        assert "Action token IDs out of range" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for out-of-range action token IDs")
