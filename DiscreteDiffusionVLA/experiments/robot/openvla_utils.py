@@ -335,18 +335,32 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     override_begin = user_begin
 
     if legacy_eval_mode:
-        if override_anchor is None and override_begin is None and raw_vla_cfg:
-            raw_anchor = raw_vla_cfg.get("action_vocab_anchor")
-            raw_begin = raw_vla_cfg.get("action_token_begin_idx")
-            if raw_anchor is not None:
-                override_anchor = raw_anchor
-            if raw_begin is not None:
-                override_begin = int(raw_begin)
-            if override_anchor is not None or override_begin is not None:
-                print("[legacy_eval] using checkpoint action vocab settings")
-        if override_anchor is None and override_begin is None:
-            override_anchor = "vocab_size"
-            print("[legacy_eval] defaulting action_vocab_anchor='vocab_size'")
+        if override_anchor is None:
+            pad_id = raw_cfg.get("pad_token_id")
+            if pad_id is None and isinstance(raw_vla_cfg, dict):
+                pad_id = raw_vla_cfg.get("pad_token_id")
+            text_cfg = raw_cfg.get("text_config") if isinstance(raw_cfg.get("text_config"), dict) else {}
+            text_vocab = text_cfg.get("vocab_size")
+            pad_to_multiple_of = raw_cfg.get("pad_to_multiple_of") or (
+                raw_vla_cfg.get("pad_to_multiple_of") if isinstance(raw_vla_cfg, dict) else 0
+            )
+            base_vocab = (
+                int(text_vocab) - int(pad_to_multiple_of)
+                if text_vocab is not None and pad_to_multiple_of
+                else text_vocab
+            )
+            if pad_id is not None and base_vocab is not None and int(pad_id) == int(base_vocab):
+                override_anchor = "pad"
+            elif pad_id is not None and text_vocab is not None and int(pad_id) < int(text_vocab):
+                override_anchor = "pad"
+            else:
+                override_anchor = "vocab_size"
+            print(f"[legacy_eval] forcing action_vocab_anchor='{override_anchor}'")
+        if override_begin is None and raw_vla_cfg and "action_token_begin_idx" in raw_vla_cfg:
+            print(
+                "[legacy_eval] ignoring checkpoint action_token_begin_idx; "
+                "use --action_token_begin_idx to override explicitly."
+            )
     elif override_anchor is None and override_begin is None and raw_vla_cfg and "action_vocab_anchor" not in raw_vla_cfg:
         override_anchor = "legacy"
         raw_begin = raw_vla_cfg.get("action_token_begin_idx")
@@ -375,33 +389,13 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         cfg.action_token_begin_idx = int(override_begin)
 
     config = AutoConfig.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=True)
+    config.legacy_eval_mode = getattr(cfg, "legacy_eval_mode", False)
     auto_map = getattr(config, "auto_map", None)
     if auto_map is None or "AutoConfig" not in auto_map or "AutoModelForVision2Seq" not in auto_map:
         config.auto_map = {
             "AutoConfig": "configuration_prismatic.OpenVLAConfig",
             "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
         }
-    if legacy_eval_mode and override_anchor == "vocab_size" and override_begin is None:
-        text_config = getattr(config, "text_config", None)
-        vocab_size = getattr(config, "vocab_size", None)
-        pad_token_id = getattr(config, "pad_token_id", None)
-        if text_config is not None:
-            if vocab_size is None:
-                vocab_size = getattr(text_config, "vocab_size", None)
-            if pad_token_id is None:
-                pad_token_id = getattr(text_config, "pad_token_id", None)
-        n_action_bins = getattr(config, "n_action_bins", None)
-        if n_action_bins is None:
-            n_action_bins = raw_vla_cfg.get("n_action_bins")
-        if vocab_size is not None and pad_token_id is not None and n_action_bins is not None:
-            action_begin = int(vocab_size) - int(n_action_bins)
-            if action_begin <= int(pad_token_id) < int(vocab_size):
-                override_anchor = "pad"
-                cfg.action_vocab_anchor = override_anchor
-                print(
-                    "[legacy_eval] action_vocab_anchor='vocab_size' overlaps pad_token_id; "
-                    "falling back to 'pad'"
-                )
     if override_anchor is not None:
         config.action_vocab_anchor = override_anchor
     if override_begin is not None:
@@ -485,6 +479,8 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         f"action_token_begin_idx={action_token_begin_idx} "
         f"pad_token_id={pad_token_id}"
     )
+    action_begin, action_end, _ = vla._action_vocab_range()
+    print(f"[action_vocab] action_range=[{action_begin}, {action_end})")
 
     # Set number of images in model input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)

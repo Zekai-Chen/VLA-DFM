@@ -1276,7 +1276,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
     set_seed_everywhere(cfg.seed)
 
     legacy_forced_sync = False
-    if cfg.legacy_eval_mode and cfg.sync_model_logic:
+    if cfg.legacy_eval_mode and cfg.use_discrete_diffusion:
+        if not cfg.sync_model_logic:
+            cfg.sync_model_logic = True
+            legacy_forced_sync = True
+    elif cfg.legacy_eval_mode and cfg.sync_model_logic:
         cfg.sync_model_logic = False
         legacy_forced_sync = True
 
@@ -1290,7 +1294,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
     log_file, local_log_filepath, run_id = setup_logging(cfg)
     if cfg.legacy_eval_mode:
         if legacy_forced_sync:
-            log_message("[legacy_eval] forcing sync_model_logic=False for legacy mode", log_file)
+            if cfg.use_discrete_diffusion:
+                log_message(
+                    "[legacy_eval] forcing sync_model_logic=True for discrete diffusion legacy parity",
+                    log_file,
+                )
+            else:
+                log_message("[legacy_eval] forcing sync_model_logic=False for legacy mode", log_file)
         else:
             log_message(f"[legacy_eval] legacy_eval_mode=True sync_model_logic={cfg.sync_model_logic}", log_file)
     _log_eval_banner(cfg, log_file)

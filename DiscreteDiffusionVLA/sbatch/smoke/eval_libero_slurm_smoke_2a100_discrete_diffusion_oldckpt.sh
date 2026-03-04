@@ -87,6 +87,12 @@ DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 
+# Legacy DD parity: force repo logic when legacy mode is enabled.
+if [[ "${LEGACY_EVAL_MODE}" == "True" || "${LEGACY_EVAL_MODE}" == "true" ]]; then
+  SYNC_MODEL_LOGIC=True
+  echo "[legacy_eval] forcing sync_model_logic=True for discrete diffusion legacy parity"
+fi
+
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
 MAX_PER_GPU=1
