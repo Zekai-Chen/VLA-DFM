@@ -333,6 +333,7 @@ def run_forward_pass(
     use_proprio,
     use_film,
     num_patches,
+    legacy_train_mode: bool = False,
     compute_diffusion_l1=False,
     num_diffusion_steps_train=None,
     use_discrete_diffusion=False,
@@ -362,6 +363,7 @@ def run_forward_pass(
         use_proprio (bool): Whether to use proprioceptive state as input.
         use_film (bool): Whether to use FiLM for better language following.
         num_patches (int): Number of vision patches.
+        legacy_train_mode (bool): Whether to use legacy action masking logic.
         compute_diffusion_l1 (bool): Whether to sample actions and compute L1 loss for diffusion (do this once every
                                     diffusion_sample_freq steps during training; do it every batch for validation)
         num_diffusion_steps_train (int): Number of diffusion steps for training (only used for diffusion).
@@ -417,7 +419,7 @@ def run_forward_pass(
     if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
-    if cfg.legacy_train_mode:
+    if legacy_train_mode:
         current_action_mask = get_current_action_mask(ground_truth_token_ids)
         next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
     else:
@@ -492,7 +494,7 @@ def run_forward_pass(
         if use_discrete_diffusion:
             # reset action mask to get correct hidden states for action portion
             ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-            if cfg.legacy_train_mode:
+            if legacy_train_mode:
                 current_action_mask = get_current_action_mask(ground_truth_token_ids)
                 next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
             else:
@@ -862,6 +864,7 @@ def run_validation(
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=num_patches,
+                legacy_train_mode=cfg.legacy_train_mode,
                 compute_diffusion_l1=True,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
@@ -1309,6 +1312,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=NUM_PATCHES,
+                legacy_train_mode=cfg.legacy_train_mode,
                 compute_diffusion_l1=compute_diffusion_l1,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
