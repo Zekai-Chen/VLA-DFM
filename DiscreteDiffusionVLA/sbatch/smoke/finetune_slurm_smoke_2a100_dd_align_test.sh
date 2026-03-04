@@ -83,14 +83,18 @@ SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
-# Legacy DD behavior (prompt/tokenization/masks); keep explicit for clarity
-LEGACY_TRAIN_MODE="True"
+# Legacy DD behavior (prompt/tokenization/masks); auto-enforced in code for DD
+# Set LEGACY_TRAIN_MODE empty to rely on defaults
+LEGACY_TRAIN_MODE=${LEGACY_TRAIN_MODE:-"True"}
 
 NPROC=${SLURM_GPUS_ON_NODE:-2}
 
 
 # --- Launch (PyTorch DDP) ---
-LEGACY_ARGS=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
+LEGACY_ARGS=()
+if [[ -n "${LEGACY_TRAIN_MODE}" ]]; then
+  LEGACY_ARGS=(--legacy_train_mode "${LEGACY_TRAIN_MODE}")
+fi
 torchrun --standalone --nnodes 1 --nproc-per-node ${NPROC} vla-scripts/finetune.py \
   --vla_path "${VLA_PATH}" \
   --data_root_dir "${DATA_ROOT}" \
