@@ -186,8 +186,11 @@ def apply_legacy_tokenization_overrides(
     if cfg.use_discrete_flow_matching:
         print("[legacy_dfm] applying legacy tokenization overrides (anchor=legacy)")
         if processor.tokenizer.mask_token_id is None:
+            processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+        if processor.tokenizer.mask_token_id is None:
             raise ValueError(
                 "legacy_dfm_mode requires a mask token in the tokenizer. "
+                "Tried to add '<mask>' but mask_token_id is still None. "
                 "Re-save the tokenizer with a mask token or use a base model that includes one."
             )
     else:

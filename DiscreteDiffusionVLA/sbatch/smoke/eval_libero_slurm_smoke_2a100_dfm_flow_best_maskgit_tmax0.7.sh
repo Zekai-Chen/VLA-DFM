@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_dfm_maskgit_tmax0.7/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-20k-tmax0p7--20260302_1313"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_1734"
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
@@ -88,6 +88,8 @@ DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
 SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+# Legacy eval mode (auto-enabled if checkpoint config requests it)
+LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
 # Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
 GRIPPER_TRACE=${GRIPPER_TRACE:-False}
@@ -226,6 +228,7 @@ start_job() {
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --legacy_eval_mode ${LEGACY_EVAL_MODE} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
       --gripper_trace ${GRIPPER_TRACE} \
       --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
