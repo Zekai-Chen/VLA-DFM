@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu              # GPU partition (48 h max)
-#SBATCH --gres=gpu:a100:2               # 2×A100 GPUs
-#SBATCH --constraint=sxm
+#SBATCH --gres=gpu:a100:1               # 2×A100 GPUs
 #SBATCH --nodes=1
-#SBATCH --mem=120G
+#SBATCH --mem=60G
 #SBATCH --time=47:00:00                 # smoke run
 #SBATCH --job-name=openvla-ft-smoke-3k-align-tmax0p7
 #SBATCH --output=logs/openvla_ft_smoke_3k_align_tmax0p7_%j.out
