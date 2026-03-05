@@ -156,6 +156,8 @@ class GenerateConfig:
     force_gripper_steps: int = 0                     # Number of env steps to force gripper value
     debug_log_all_metrics: bool = True               # If True, emit full debug payloads into eval log
     debug_log_every: int = 1                         # Emit debug payload every N chunks (1 = every)
+    action_audit: bool = False                       # If True, write per-chunk action audit JSONL + summary
+    action_audit_every: int = 1                      # Emit action audit every N chunks (1 = every)
 
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = True                         # Whether to include proprio state in input
@@ -413,6 +415,8 @@ def _log_eval_banner(cfg: GenerateConfig, log_file=None) -> None:
         f"gripper_audit={cfg.gripper_audit} "
         f"debug_log_all_metrics={cfg.debug_log_all_metrics} "
         f"debug_log_every={cfg.debug_log_every} "
+        f"action_audit={cfg.action_audit} "
+        f"action_audit_every={cfg.action_audit_every} "
         f"dfm_decode_mode={cfg.dfm_decode_mode}",
         log_file,
     )
@@ -537,6 +541,142 @@ def _update_gripper_audit(
                 "gripper_token_ids": list(gripper_token_ids),
             }
         )
+
+
+def _init_action_audit_state(action_dim: int, bins: int = 10) -> dict:
+    edges = np.linspace(-1.0, 1.0, bins + 1)
+    return {
+        "bins": edges.tolist(),
+        "chunks": 0,
+        "raw": {
+            "min": [float("inf")] * action_dim,
+            "max": [float("-inf")] * action_dim,
+            "sum": [0.0] * action_dim,
+            "sum_sq": [0.0] * action_dim,
+            "count": 0,
+            "clip": [0] * action_dim,
+            "hist": [np.zeros(bins, dtype=np.int64) for _ in range(action_dim)],
+        },
+        "post": {
+            "min": [float("inf")] * action_dim,
+            "max": [float("-inf")] * action_dim,
+            "sum": [0.0] * action_dim,
+            "sum_sq": [0.0] * action_dim,
+            "count": 0,
+            "clip": [0] * action_dim,
+            "hist": [np.zeros(bins, dtype=np.int64) for _ in range(action_dim)],
+        },
+        "token_hist": [Counter() for _ in range(action_dim)],
+    }
+
+
+def _update_action_audit(
+    actions: np.ndarray,
+    cfg: GenerateConfig,
+    action_tokenizer: Optional[ActionTokenizer],
+    action_stats: Optional[dict],
+    audit_state: dict,
+    audit_writer=None,
+    task_id: Optional[int] = None,
+    episode_idx: Optional[int] = None,
+    chunk_idx: Optional[int] = None,
+    env_step: Optional[int] = None,
+) -> None:
+    if actions is None or audit_state is None:
+        return
+    actions_np = np.asarray(actions)
+    if actions_np.size == 0:
+        return
+
+    post_actions = np.stack(
+        [process_action(a.copy(), cfg.model_family, cfg.gripper_debug_raw) for a in actions_np],
+        axis=0,
+    )
+    flat_raw = actions_np.reshape(-1, actions_np.shape[-1])
+    flat_post = post_actions.reshape(-1, post_actions.shape[-1])
+
+    edges = np.asarray(audit_state["bins"], dtype=np.float32)
+    for dim in range(flat_raw.shape[-1]):
+        vals = flat_raw[:, dim]
+        audit_state["raw"]["min"][dim] = float(min(audit_state["raw"]["min"][dim], np.min(vals)))
+        audit_state["raw"]["max"][dim] = float(max(audit_state["raw"]["max"][dim], np.max(vals)))
+        audit_state["raw"]["sum"][dim] += float(np.sum(vals))
+        audit_state["raw"]["sum_sq"][dim] += float(np.sum(vals * vals))
+        audit_state["raw"]["clip"][dim] += int(np.sum(np.abs(vals) >= 1.0))
+        hist, _ = np.histogram(vals, bins=edges)
+        audit_state["raw"]["hist"][dim] += hist
+
+        pvals = flat_post[:, dim]
+        audit_state["post"]["min"][dim] = float(min(audit_state["post"]["min"][dim], np.min(pvals)))
+        audit_state["post"]["max"][dim] = float(max(audit_state["post"]["max"][dim], np.max(pvals)))
+        audit_state["post"]["sum"][dim] += float(np.sum(pvals))
+        audit_state["post"]["sum_sq"][dim] += float(np.sum(pvals * pvals))
+        audit_state["post"]["clip"][dim] += int(np.sum(np.abs(pvals) >= 1.0))
+        phist, _ = np.histogram(pvals, bins=edges)
+        audit_state["post"]["hist"][dim] += phist
+
+    audit_state["raw"]["count"] += int(flat_raw.shape[0])
+    audit_state["post"]["count"] += int(flat_post.shape[0])
+    audit_state["chunks"] += 1
+
+    token_ids_by_dim = None
+    if action_tokenizer is not None and action_stats is not None:
+        try:
+            actions_norm = _normalize_actions(actions_np, action_stats)
+            token_ids = action_tokenizer.encode_actions_to_token_ids(actions_norm)
+            if token_ids.size % flat_raw.shape[-1] == 0:
+                token_ids_by_dim = token_ids.reshape(-1, flat_raw.shape[-1])
+                for dim in range(token_ids_by_dim.shape[-1]):
+                    audit_state["token_hist"][dim].update(token_ids_by_dim[:, dim].tolist())
+        except Exception:
+            token_ids_by_dim = None
+
+    if audit_writer is not None:
+        audit_writer.write(
+            {
+                "task_id": task_id,
+                "episode": episode_idx,
+                "chunk_idx": chunk_idx,
+                "env_step": env_step,
+                "actions_raw": actions_np.tolist(),
+                "actions_post": post_actions.tolist(),
+                "action_token_ids": token_ids_by_dim.tolist() if token_ids_by_dim is not None else None,
+            }
+        )
+
+
+def _log_action_audit_summary(audit_state: dict, log_file=None) -> None:
+    if not audit_state or audit_state["raw"]["count"] == 0:
+        log_message("[action_audit] no data collected", log_file)
+        return
+
+    def _summarize(bucket: dict) -> dict:
+        count = max(bucket["count"], 1)
+        mean = [s / count for s in bucket["sum"]]
+        std = [float(np.sqrt(max(ss / count - (m * m), 0.0))) for ss, m in zip(bucket["sum_sq"], mean)]
+        clip_frac = [c / count for c in bucket["clip"]]
+        return {
+            "min": bucket["min"],
+            "max": bucket["max"],
+            "mean": mean,
+            "std": std,
+            "clip_frac": clip_frac,
+            "hist_counts": [h.tolist() for h in bucket["hist"]],
+        }
+
+    raw_summary = _summarize(audit_state["raw"])
+    post_summary = _summarize(audit_state["post"])
+
+    log_message(f"[action_audit] chunks={audit_state.get('chunks', 0)} samples={audit_state['raw']['count']}", log_file)
+    log_message(f"[action_audit] raw_summary={raw_summary}", log_file)
+    log_message(f"[action_audit] post_summary={post_summary}", log_file)
+
+    # Token histogram summary (top-5 per dim)
+    token_summary = {}
+    for dim, counter in enumerate(audit_state.get("token_hist", [])):
+        token_summary[str(dim)] = counter.most_common(5)
+    if token_summary:
+        log_message(f"[action_audit] token_hist_top5={token_summary}", log_file)
 
 
 def _log_gripper_audit_summary(audit_state: dict, log_file=None) -> None:
@@ -835,6 +975,8 @@ def run_episode(
     initial_state=None,
     gripper_audit_state=None,
     gripper_audit_writer=None,
+    action_audit_state=None,
+    action_audit_writer=None,
     action_tokenizer: Optional[ActionTokenizer] = None,
     action_stats: Optional[dict] = None,
     log_file=None,
@@ -1095,6 +1237,20 @@ def run_episode(
                         episode_idx=episode_idx,
                         chunk_idx=chunk_idx,
                     )
+                if cfg.action_audit and action_audit_state is not None:
+                    if cfg.action_audit_every <= 1 or (chunk_idx % cfg.action_audit_every == 0):
+                        _update_action_audit(
+                            actions=actions,
+                            cfg=cfg,
+                            action_tokenizer=action_tokenizer,
+                            action_stats=action_stats,
+                            audit_state=action_audit_state,
+                            audit_writer=action_audit_writer,
+                            task_id=task_id,
+                            episode_idx=episode_idx,
+                            chunk_idx=chunk_idx,
+                            env_step=t,
+                        )
                 chunk_idx += 1
                 if cfg.use_wandb and cfg.use_discrete_flow_matching and hasattr(model, "last_dfm_stats"):
                     dfm_stats = model.last_dfm_stats or {}
@@ -1169,6 +1325,8 @@ def run_task(
     noisy_action_projector=None,
     gripper_audit_state=None,
     gripper_audit_writer=None,
+    action_audit_state=None,
+    action_audit_writer=None,
     action_tokenizer: Optional[ActionTokenizer] = None,
     action_stats: Optional[dict] = None,
     total_episodes=0,
@@ -1225,6 +1383,8 @@ def run_task(
             initial_state,
             gripper_audit_state,
             gripper_audit_writer,
+            action_audit_state,
+            action_audit_writer,
             action_tokenizer,
             action_stats,
             log_file,
@@ -1310,7 +1470,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Action tokenizer for audits only (probes build their own to keep dependencies optional)
     action_tokenizer = None
     action_stats = None
-    if cfg.gripper_audit:
+    if cfg.gripper_audit or cfg.action_audit:
         n_action_bins = getattr(model.config, "n_action_bins", 256)
         anchor = getattr(model.config, "action_vocab_anchor", "pad")
         begin_override = getattr(model.config, "action_token_begin_idx", None)
@@ -1334,6 +1494,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
         gripper_audit_path = os.path.join(cfg.local_log_dir, run_id + "_gripper_audit.jsonl")
         gripper_audit_writer = JsonlWriter(gripper_audit_path)
         log_message(f"[gripper_audit] writing per-chunk logs to {gripper_audit_path}", log_file)
+    action_audit_writer = None
+    action_audit_state = None
+    if cfg.action_audit:
+        action_audit_state = _init_action_audit_state(ACTION_DIM)
+        action_audit_path = os.path.join(cfg.local_log_dir, run_id + "_action_audit.jsonl")
+        action_audit_writer = JsonlWriter(action_audit_path)
+        log_message(f"[action_audit] writing per-chunk logs to {action_audit_path}", log_file)
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -1361,6 +1528,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             noisy_action_projector,
             gripper_audit_state,
             gripper_audit_writer,
+            action_audit_state,
+            action_audit_writer,
             action_tokenizer,
             action_stats,
             total_episodes,
@@ -1391,6 +1560,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
         gripper_audit_writer.close()
     if cfg.gripper_audit and gripper_audit_state is not None:
         _log_gripper_audit_summary(gripper_audit_state, log_file)
+    if action_audit_writer is not None:
+        action_audit_writer.close()
+    if cfg.action_audit and action_audit_state is not None:
+        _log_action_audit_summary(action_audit_state, log_file)
 
     # Close log file
     if log_file:
