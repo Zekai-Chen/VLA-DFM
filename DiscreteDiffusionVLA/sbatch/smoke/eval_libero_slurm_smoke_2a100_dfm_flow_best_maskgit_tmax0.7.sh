@@ -90,6 +90,9 @@ SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
 # Legacy eval mode (auto-enabled if checkpoint config requests it)
 LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
+# Action vocab overrides (needed for legacy DFM off-by-one)
+ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31744}
 # Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
 GRIPPER_TRACE=${GRIPPER_TRACE:-False}
@@ -229,6 +232,8 @@ start_job() {
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
       --legacy_eval_mode ${LEGACY_EVAL_MODE} \
+      --action_vocab_anchor ${ACTION_VOCAB_ANCHOR} \
+      --action_token_begin_idx ${ACTION_TOKEN_BEGIN_IDX} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
       --gripper_trace ${GRIPPER_TRACE} \
       --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
