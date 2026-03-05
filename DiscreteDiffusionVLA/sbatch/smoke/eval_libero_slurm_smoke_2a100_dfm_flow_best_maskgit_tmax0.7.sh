@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_dfm_maskgit_tmax0.7/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_1903"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_2114"
 TASK_SUITE="libero_object"
 NUM_TRIALS=50
 DFM_DEBUG=${DFM_DEBUG:-True}
@@ -92,7 +92,7 @@ USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
 LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
 # Action vocab overrides (needed for legacy DFM off-by-one)
 ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
-ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31744}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
 # Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
 GRIPPER_TRACE=${GRIPPER_TRACE:-False}

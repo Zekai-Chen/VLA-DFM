@@ -186,3 +186,34 @@ def test_legacy_dfm_action_range():
     assert model_config.legacy_eval_mode is True
     assert model_config.action_vocab_anchor == "legacy"
     assert model_config.action_token_begin_idx == ACTION_TOKEN_BEGIN_IDX
+
+
+def test_legacy_dfm_model_range_uses_constant():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    root = Path(__file__).resolve().parents[1]
+    model_path = root / "prismatic" / "extern" / "hf" / "modeling_prismatic.py"
+    spec = importlib.util.spec_from_file_location("modeling_prismatic", model_path)
+    modeling_prismatic = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(modeling_prismatic)
+
+    dummy = SimpleNamespace(
+        config=SimpleNamespace(
+            n_action_bins=256,
+            legacy_eval_mode=True,
+            legacy_train_mode=False,
+            use_discrete_flow_matching=True,
+        ),
+        pad_token_id=32000,
+        vocab_size=32000,
+        bin_centers=np.zeros(256, dtype=np.float32),
+    )
+
+    begin, end, n_bins = modeling_prismatic.OpenVLAForActionPrediction._action_vocab_range(dummy)
+    assert begin == ACTION_TOKEN_BEGIN_IDX
+    assert end == begin + n_bins

@@ -467,7 +467,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             raise ValueError("n_action_bins must be set on config or via bin_centers.")
         n_bins = int(n_bins)
         if getattr(self.config, "legacy_eval_mode", False) or getattr(self.config, "legacy_train_mode", False):
-            action_begin = int(ACTION_TOKEN_BEGIN_IDX + 1)
+            if getattr(self.config, "use_discrete_flow_matching", False):
+                action_begin = int(ACTION_TOKEN_BEGIN_IDX)
+            else:
+                action_begin = int(ACTION_TOKEN_BEGIN_IDX + 1)
             action_end = int(action_begin + n_bins)
             return action_begin, action_end, n_bins
         begin_override = getattr(self.config, "action_token_begin_idx", None)
