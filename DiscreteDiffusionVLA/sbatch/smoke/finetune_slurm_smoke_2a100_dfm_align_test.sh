@@ -99,6 +99,8 @@ DFM_T_MIN=0.0
 DFM_T_MAX=${DFM_T_MAX}
 DFM_WEIGHT_CLIP=20.0
 DFM_TRAIN_MODE="flow"
+# Legacy DFM tokenization (enabled by default for this script)
+LEGACY_DFM_MODE=${LEGACY_DFM_MODE:-True}
 # MaskGIT iterations for inference config
 DFM_MASKGIT_NUM_STEPS=12
 # Note: mask/pad embeddings are now saved via LoRA modules_to_save (see finetune.py).
@@ -141,6 +143,7 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
     --dfm_train_mode ${DFM_TRAIN_MODE} \
     --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
+    --legacy_dfm_mode ${LEGACY_DFM_MODE} \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
     --run_id_note "smoke-2xA100-3k-align-tmax${DFM_T_MAX_TAG}--$(date +%Y%m%d_%H%M)" \
