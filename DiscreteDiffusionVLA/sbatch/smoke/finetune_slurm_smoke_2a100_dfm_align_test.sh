@@ -82,9 +82,9 @@ RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-align-tma
 # Increased to better utilize 80GB A100s while leaving headroom for spikes.
 BATCH_SIZE=4
 LEARNING_RATE=5e-4
-NUM_STEPS_BEFORE_DECAY=1000
-MAX_STEPS=3000
-SAVE_FREQ=1000
+NUM_STEPS_BEFORE_DECAY=10000
+MAX_STEPS=2000
+SAVE_FREQ=5000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
