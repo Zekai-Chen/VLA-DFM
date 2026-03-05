@@ -74,7 +74,7 @@ mkdir -p "$LOG_DIR"
 # --- Smoke eval params ---
 CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260304_2141"
 TASK_SUITE="libero_object"
-NUM_TRIALS=50
+NUM_TRIALS=2
 DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
