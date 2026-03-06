@@ -1440,6 +1440,9 @@ def eval_libero(cfg: GenerateConfig) -> float:
         if not cfg.sync_model_logic:
             cfg.sync_model_logic = True
             legacy_forced_sync = True
+    elif cfg.legacy_eval_mode and cfg.use_discrete_flow_matching:
+        # Allow sync_model_logic for legacy DFM to pick up repo-side fixes.
+        legacy_forced_sync = False
     elif cfg.legacy_eval_mode and cfg.sync_model_logic:
         cfg.sync_model_logic = False
         legacy_forced_sync = True
@@ -1462,7 +1465,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
             else:
                 log_message("[legacy_eval] forcing sync_model_logic=False for legacy mode", log_file)
         else:
-            log_message(f"[legacy_eval] legacy_eval_mode=True sync_model_logic={cfg.sync_model_logic}", log_file)
+            log_message(
+                f"[legacy_eval] legacy_eval_mode=True sync_model_logic={cfg.sync_model_logic}",
+                log_file,
+            )
     _log_eval_banner(cfg, log_file)
     _log_action_vocab_summary(model, processor, log_file)
     _log_dfm_params(cfg, model, log_file)
