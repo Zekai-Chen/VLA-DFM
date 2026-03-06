@@ -259,6 +259,8 @@ start_job() {
       --topk_filter_thres 0.0 \
       --dfm_debug ${DFM_DEBUG} \
       --dfm_debug_level ${DFM_DEBUG_LEVEL} \
+      --dfm_log_mask_stats True \
+      --dfm_log_mask_every 1 \
       --dfm_fail_fast ${DFM_FAIL_FAST} \
       --dfm_num_steps ${DFM_NUM_STEPS} \
       --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \

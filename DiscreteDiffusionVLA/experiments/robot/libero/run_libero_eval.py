@@ -143,6 +143,8 @@ class GenerateConfig:
     dfm_min_valid_action_frac: float = 0.999         # Fail-fast threshold for in-action fraction
     dfm_max_mask_frac: float = 0.0                   # Fail-fast threshold for final mask fraction
     dfm_max_nan_frac: float = 0.0                    # Fail-fast threshold for NaN action fraction
+    dfm_log_mask_stats: bool = False                 # If True, log per-step mask stats in debug payloads
+    dfm_log_mask_every: int = 1                      # Emit mask stats every N chunks (1 = every)
 
     # Action vocab overrides (legacy compatibility)
     action_vocab_anchor: Optional[str] = None        # Override action vocab anchor (pad|vocab_size|legacy)
@@ -1030,6 +1032,10 @@ def run_episode(
             if len(action_queue) == 0:
                 debug = None
                 if cfg.dfm_debug and cfg.use_discrete_flow_matching:
+                    log_mask_stats = (
+                        cfg.dfm_log_mask_stats
+                        and (cfg.dfm_log_mask_every <= 1 or (chunk_idx % cfg.dfm_log_mask_every == 0))
+                    )
                     actions, debug = get_action(
                         cfg,
                         model,
@@ -1045,6 +1051,7 @@ def run_episode(
                         return_debug=True,
                         dfm_debug_level=cfg.dfm_debug_level,
                         dfm_decode_mode=cfg.dfm_decode_mode,
+                        dfm_log_mask_stats=log_mask_stats,
                     )
                     if debug_writer is not None:
                         # Minimal diagnostics: first two episodes only
