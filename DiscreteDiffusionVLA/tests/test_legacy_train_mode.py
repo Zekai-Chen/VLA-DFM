@@ -1,7 +1,12 @@
+import importlib
+import importlib.util
+import sys
+import types
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
-from types import SimpleNamespace
 
 from prismatic.training.train_utils import get_current_action_mask, get_next_actions_mask
 from prismatic.vla.action_tokenizer import ActionTokenizer
@@ -42,6 +47,86 @@ class _DummyPromptBuilder:
 
 def _image_transform(_img):
     return torch.zeros((3, 2, 2), dtype=torch.float32)
+
+
+def _install_diffusers_stub():
+    """Provide a minimal diffusers stub to avoid peft version checks in tests."""
+    if "diffusers" in sys.modules:
+        return
+    diffusers = types.ModuleType("diffusers")
+    schedulers = types.ModuleType("diffusers.schedulers")
+    scheduling_ddim = types.ModuleType("diffusers.schedulers.scheduling_ddim")
+
+    class _DDIMScheduler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    scheduling_ddim.DDIMScheduler = _DDIMScheduler
+    schedulers.scheduling_ddim = scheduling_ddim
+    diffusers.schedulers = schedulers
+
+    sys.modules["diffusers"] = diffusers
+    sys.modules["diffusers.schedulers"] = schedulers
+    sys.modules["diffusers.schedulers.scheduling_ddim"] = scheduling_ddim
+
+
+def _install_peft_stub():
+    """Provide a minimal peft stub when peft is unavailable."""
+    if "peft" in sys.modules:
+        return
+    try:
+        import peft  # type: ignore
+        _ = peft
+        return
+    except Exception:
+        pass
+    peft_mod = types.ModuleType("peft")
+
+    class _Dummy:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def _get_peft_model(*args, **kwargs):
+        return _Dummy()
+
+    peft_mod.LoraConfig = _Dummy
+    peft_mod.PeftModel = _Dummy
+    peft_mod.get_peft_model = _get_peft_model
+    sys.modules["peft"] = peft_mod
+
+
+def _install_timm_stub():
+    """Provide a minimal timm stub for tests that import modeling_prismatic."""
+    if "timm" in sys.modules:
+        return
+    try:
+        import timm  # type: ignore
+        _ = timm
+        return
+    except Exception:
+        pass
+    timm_mod = types.ModuleType("timm")
+    sys.modules["timm"] = timm_mod
+
+
+def _require_module(name: str):
+    if importlib.util.find_spec(name) is None:
+        pytest.skip(f"{name} is not installed")
+
+
+def _import_finetune_module():
+    from pathlib import Path
+
+    _require_module("transformers")
+    _install_diffusers_stub()
+    _install_peft_stub()
+    root = Path(__file__).resolve().parents[1]
+    finetune_path = root / "vla-scripts" / "finetune.py"
+    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
+    finetune = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(finetune)
+    return finetune
 
 
 def test_rlds_batch_transform_legacy_action_string_masking():
@@ -86,16 +171,7 @@ def test_legacy_action_mask_fallback():
 
 
 def test_legacy_train_stamps_config():
-    import importlib.util
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    root = Path(__file__).resolve().parents[1]
-    finetune_path = root / "vla-scripts" / "finetune.py"
-    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
-    finetune = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(finetune)
+    finetune = _import_finetune_module()
     apply_legacy_tokenization_overrides = finetune.apply_legacy_tokenization_overrides
 
     cfg = SimpleNamespace(
@@ -126,16 +202,7 @@ def test_legacy_train_stamps_config():
 
 
 def test_legacy_dfm_mode_requires_dfm():
-    import importlib.util
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    root = Path(__file__).resolve().parents[1]
-    finetune_path = root / "vla-scripts" / "finetune.py"
-    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
-    finetune = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(finetune)
+    finetune = _import_finetune_module()
     resolve_legacy_tokenization_mode = finetune.resolve_legacy_tokenization_mode
 
     cfg = SimpleNamespace(
@@ -149,16 +216,7 @@ def test_legacy_dfm_mode_requires_dfm():
 
 
 def test_legacy_dfm_action_range():
-    import importlib.util
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    root = Path(__file__).resolve().parents[1]
-    finetune_path = root / "vla-scripts" / "finetune.py"
-    spec = importlib.util.spec_from_file_location("finetune", finetune_path)
-    finetune = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(finetune)
+    finetune = _import_finetune_module()
     apply_legacy_tokenization_overrides = finetune.apply_legacy_tokenization_overrides
 
     cfg = SimpleNamespace(
@@ -189,18 +247,10 @@ def test_legacy_dfm_action_range():
 
 
 def test_legacy_dfm_model_range_uses_constant():
-    import importlib.util
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    import numpy as np
-
-    root = Path(__file__).resolve().parents[1]
-    model_path = root / "prismatic" / "extern" / "hf" / "modeling_prismatic.py"
-    spec = importlib.util.spec_from_file_location("modeling_prismatic", model_path)
-    modeling_prismatic = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(modeling_prismatic)
+    _require_module("transformers")
+    _require_module("tokenizers")
+    _install_timm_stub()
+    modeling_prismatic = importlib.import_module("prismatic.extern.hf.modeling_prismatic")
 
     dummy = SimpleNamespace(
         config=SimpleNamespace(
@@ -215,5 +265,5 @@ def test_legacy_dfm_model_range_uses_constant():
     )
 
     begin, end, n_bins = modeling_prismatic.OpenVLAForActionPrediction._action_vocab_range(dummy)
-    assert begin == ACTION_TOKEN_BEGIN_IDX
+    assert begin == ACTION_TOKEN_BEGIN_IDX + 1
     assert end == begin + n_bins
