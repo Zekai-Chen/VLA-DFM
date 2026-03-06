@@ -1010,25 +1010,45 @@ def get_vla_action(
                 f"model_range=[{model_begin}, {model_end}) "
                 f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
             )
-            if model_begin != tokenizer_range.begin or model_end != tokenizer_range.end:
-                raise RuntimeError(
-                    "DFM action vocab mismatch: "
-                    f"model_range=[{model_begin}, {model_end}) "
-                    f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+            if legacy_mode:
+                legacy_tokenizer = ActionTokenizer(
+                    processor.tokenizer,
+                    bins=n_bins,
+                    action_vocab_anchor="legacy",
+                    action_token_begin_idx=ACTION_TOKEN_BEGIN_IDX,
+                    legacy_bins=True,
                 )
-            # Build tokenizer to validate derived begin/end matches action tokenizer expectation.
-            action_tokenizer = ActionTokenizer(
-                processor.tokenizer,
-                bins=n_bins,
-                action_vocab_anchor=anchor,
-                action_token_begin_idx=begin_override,
-            )
-            if action_tokenizer.action_token_begin_idx != tokenizer_range.begin:
-                raise RuntimeError(
-                    "DFM action vocab mismatch: "
-                    f"tokenizer_begin={action_tokenizer.action_token_begin_idx} "
-                    f"config_begin={tokenizer_range.begin}"
+                legacy_begin_expected = int(legacy_tokenizer.action_token_begin_idx + 1)
+                legacy_end_expected = int(legacy_begin_expected + n_bins)
+                if model_begin != legacy_begin_expected or model_end != legacy_end_expected:
+                    raise RuntimeError(
+                        "Legacy DFM action vocab mismatch: "
+                        f"model_range=[{model_begin}, {model_end}) "
+                        f"expected=[{legacy_begin_expected}, {legacy_end_expected}) "
+                        "from legacy ActionTokenizer. "
+                        "If using a legacy DFM checkpoint, ensure eval uses updated model logic "
+                        "(set --sync_model_logic True) or fix the legacy DFM range."
+                    )
+            else:
+                if model_begin != tokenizer_range.begin or model_end != tokenizer_range.end:
+                    raise RuntimeError(
+                        "DFM action vocab mismatch: "
+                        f"model_range=[{model_begin}, {model_end}) "
+                        f"tokenizer_range=[{tokenizer_range.begin}, {tokenizer_range.end})"
+                    )
+                # Build tokenizer to validate derived begin/end matches action tokenizer expectation.
+                action_tokenizer = ActionTokenizer(
+                    processor.tokenizer,
+                    bins=n_bins,
+                    action_vocab_anchor=anchor,
+                    action_token_begin_idx=begin_override,
                 )
+                if action_tokenizer.action_token_begin_idx != tokenizer_range.begin:
+                    raise RuntimeError(
+                        "DFM action vocab mismatch: "
+                        f"tokenizer_begin={action_tokenizer.action_token_begin_idx} "
+                        f"config_begin={tokenizer_range.begin}"
+                    )
         # Ensure mask token is available for discrete diffusion / DFM
         if (use_discrete_diffusion or use_discrete_flow_matching) and processor.tokenizer.mask_token_id is None:
             if legacy_mode:
