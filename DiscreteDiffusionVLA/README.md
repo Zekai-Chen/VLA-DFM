@@ -38,6 +38,12 @@ We fine-tuned OpenVLA via LoRA (r=32) on four LIBERO task suites: LIBERO-Spatial
 - DD finetune (20k): `sbatch/smoke/finetune_slurm_smoke_2a100_wandb_dd_20k.sh`
 - DD eval: `sbatch/smoke/eval_libero_slurm_smoke_2a100_discrete_diffusion.sh`
 
+### Working scripts (current)
+- **DD** eval (working): `sbatch/smoke/eval_libero_slurm_smoke_2a100_discrete_diffusion.sh`
+- **DD** finetune (working): `sbatch/smoke/finetune_slurm_smoke_2a100_dd_align_test.sh`
+- **DFM** finetune (testing): `sbatch/smoke/finetune_slurm_smoke_2a100_dfm_align_test.sh`
+- **DFM** eval (testing): `sbatch/smoke/eval_libero_slurm_smoke_2a100_dfm_flow_best_maskgit_tmax0.7.sh`
+
 And please refer to [scripts/eval_libero_object_batch.sh](scripts/eval_libero_object_batch.sh) for evaluation.
 Notes:
 * The evaluation script will run 500 trials by default (10 tasks x 50 episodes each). You can modify the number of
