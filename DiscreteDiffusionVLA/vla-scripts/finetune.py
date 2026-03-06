@@ -136,6 +136,9 @@ class FinetuneConfig:
     dfm_maskgit_num_steps: int = 12                  # MaskGIT iterations (for inference config)
     dfm_maskgit_schedule: str = "cosine"             # MaskGIT schedule (for inference config)
     dfm_t_bias_alpha: float = 1.0                    # Low-t bias for DFM sampling (>1 biases low-t)
+    dfm_log_mask_stats: bool = False                # If True, emit per-batch DFM mask trace JSONL
+    dfm_log_mask_every: int = 1                      # Log every N gradient steps
+    dfm_log_mask_max_samples: int = 5000             # Max number of per-sample traces to write
 
     # fmt: on
 
@@ -448,7 +451,8 @@ def run_forward_pass(
     dfm_weight_clip: float = 20.0,
     dfm_train_mode: str = "flow",
     dfm_t_bias_alpha: float = 1.0,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+    dfm_log_mask_stats: bool = False,
+) -> Tuple[torch.Tensor, Dict[str, float], Optional[Dict[str, torch.Tensor]]]:
     """
     Compute model forward pass and metrics for both training and validation.
 
@@ -471,9 +475,10 @@ def run_forward_pass(
         num_diffusion_steps_train (int): Number of diffusion steps for training (only used for diffusion).
 
     Returns:
-        tuple: (loss, metrics_dict)
+        tuple: (loss, metrics_dict, dfm_trace)
             loss: The loss tensor with gradient for backpropagation.
             metrics_dict: Dictionary of computed metrics (detached values for logging).
+            dfm_trace: Optional dict containing per-batch t/kappa/mask_frac tensors.
     """
     metrics = {}
 
@@ -514,6 +519,7 @@ def run_forward_pass(
             dfm_weight_clip=dfm_weight_clip,
             dfm_train_mode=dfm_train_mode,
             dfm_t_bias_alpha=dfm_t_bias_alpha,
+            dfm_log_mask_stats=dfm_log_mask_stats,
         )
 
     # Get action masks needed for logging
@@ -669,7 +675,8 @@ def run_forward_pass(
             )
 
     # Return both the loss tensor (with gradients) and the metrics dictionary (with detached values)
-    return loss, metrics
+    dfm_trace = getattr(output, "dfm_trace", None)
+    return loss, metrics, dfm_trace
 
 
 def run_diffusion_sampling(
@@ -954,7 +961,7 @@ def run_validation(
     with torch.no_grad():
         for batch in val_dataloader:
             # Always compute L1 loss for validation, even for diffusion
-            _, metrics = run_forward_pass(
+            _, metrics, _ = run_forward_pass(
                 vla=vla,
                 action_head=action_head,
                 noisy_action_projector=noisy_action_projector,
@@ -981,6 +988,7 @@ def run_validation(
                 dfm_weight_clip=cfg.dfm_weight_clip,
                 dfm_train_mode=cfg.dfm_train_mode,
                 dfm_t_bias_alpha=cfg.dfm_t_bias_alpha,
+                dfm_log_mask_stats=False,
             )
 
             # Add the loss value to the metrics
@@ -1056,6 +1064,13 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Initialize wandb logging
     if distributed_state.is_main_process:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
+
+    # Optional DFM mask-trace logging
+    dfm_trace_path = None
+    dfm_trace_samples = 0
+    if cfg.dfm_log_mask_stats and cfg.use_discrete_flow_matching and distributed_state.is_main_process:
+        dfm_trace_path = run_dir / "dfm_train_mask_trace.jsonl"
+        print(f"[dfm_trace] logging per-batch mask stats to {dfm_trace_path}")
 
     # Print detected constants
     print(
@@ -1445,7 +1460,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         for batch_idx, batch in enumerate(dataloader):
             # Compute training metrics and loss
             compute_diffusion_l1 = cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0
-            loss, metrics = run_forward_pass(
+            loss, metrics, dfm_trace = run_forward_pass(
                 vla=vla,
                 action_head=action_head,
                 noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
@@ -1472,6 +1487,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 dfm_weight_clip=cfg.dfm_weight_clip,
                 dfm_train_mode=cfg.dfm_train_mode,
                 dfm_t_bias_alpha=cfg.dfm_t_bias_alpha,
+                dfm_log_mask_stats=cfg.dfm_log_mask_stats if cfg.use_discrete_flow_matching else False,
             )
 
             # Normalize loss to account for gradient accumulation
@@ -1491,8 +1507,41 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Compute smoothened train metrics
             smoothened_metrics = compute_smoothened_metrics(recent_metrics)
 
-            # Push Metrics to W&B (every wandb_log_freq gradient steps)
+            # Compute global log step index
             log_step = gradient_step_idx if not cfg.resume else cfg.resume_step + gradient_step_idx
+
+            # Optional per-batch DFM trace logging
+            if (
+                dfm_trace_path is not None
+                and dfm_trace is not None
+                and cfg.dfm_log_mask_every > 0
+                and (cfg.dfm_log_mask_every == 1 or (log_step % cfg.dfm_log_mask_every == 0))
+                and dfm_trace_samples < cfg.dfm_log_mask_max_samples
+            ):
+                try:
+                    t_vals = dfm_trace.get("t")
+                    kappa_vals = dfm_trace.get("kappa")
+                    mask_frac_vals = dfm_trace.get("mask_frac")
+                    if t_vals is not None and kappa_vals is not None and mask_frac_vals is not None:
+                        t_list = t_vals.detach().float().cpu().view(-1).tolist()
+                        kappa_list = kappa_vals.detach().float().cpu().view(-1).tolist()
+                        mask_frac_list = mask_frac_vals.detach().float().cpu().view(-1).tolist()
+                        remaining = max(cfg.dfm_log_mask_max_samples - dfm_trace_samples, 0)
+                        n = min(len(t_list), len(kappa_list), len(mask_frac_list), remaining)
+                        if n > 0:
+                            row = {
+                                "step": int(log_step),
+                                "t": t_list[:n],
+                                "kappa": kappa_list[:n],
+                                "mask_frac": mask_frac_list[:n],
+                            }
+                            with open(dfm_trace_path, "a", encoding="utf-8") as handle:
+                                handle.write(json.dumps(row) + "\n")
+                            dfm_trace_samples += n
+                except Exception as exc:
+                    print(f"[dfm_trace] failed to log mask stats: {exc}")
+
+            # Push Metrics to W&B (every wandb_log_freq gradient steps)
             if distributed_state.is_main_process and log_step % cfg.wandb_log_freq == 0:
                 log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
 

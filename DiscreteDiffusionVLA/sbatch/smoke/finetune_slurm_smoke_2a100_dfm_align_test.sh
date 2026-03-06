@@ -142,6 +142,9 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
     --dfm_train_mode ${DFM_TRAIN_MODE} \
     --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
+    --dfm_log_mask_stats True \
+    --dfm_log_mask_every 1 \
+    --dfm_log_mask_max_samples 5000 \
     --legacy_dfm_mode ${LEGACY_DFM_MODE} \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
