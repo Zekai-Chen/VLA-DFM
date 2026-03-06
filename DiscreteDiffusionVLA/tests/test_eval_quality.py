@@ -77,10 +77,12 @@ def test_action_masks_legacy_fallback_runs():
 
 
 def test_action_tokenizer_legacy_anchor_uses_constant():
-    tok = _DummyTokenizer(vocab_size=32010, pad_token_id=32000)
-    action_tokenizer = ActionTokenizer(tok, bins=8, action_vocab_anchor="legacy")
+    bins = 8
+    vocab_size = ACTION_TOKEN_BEGIN_IDX + bins + 1
+    tok = _DummyTokenizer(vocab_size=vocab_size, pad_token_id=vocab_size - 1)
+    action_tokenizer = ActionTokenizer(tok, bins=bins, action_vocab_anchor="legacy")
     assert action_tokenizer.action_token_begin_idx == ACTION_TOKEN_BEGIN_IDX
-    assert action_tokenizer.action_token_end_idx == ACTION_TOKEN_BEGIN_IDX + 8
+    assert action_tokenizer.action_token_end_idx == ACTION_TOKEN_BEGIN_IDX + bins
 
 
 def test_action_tokenizer_legacy_bins_vocab_anchor():
