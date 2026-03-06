@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu              # GPU partition (48 h max)
-#SBATCH --gres=gpu:a100:2               # 2×A100 GPUs
-#SBATCH --constraint=sxm
+#SBATCH --gres=gpu:a100:1               # 2×A100 GPUs
 #SBATCH --nodes=1
-#SBATCH --mem=120G
+#SBATCH --mem=60G
 #SBATCH --time=47:00:00                 # smoke run
 #SBATCH --job-name=openvla-ft-smoke-3k-align-tmax0p7
 #SBATCH --output=logs/openvla_ft_smoke_3k_align_tmax0p7_%j.out
@@ -83,9 +82,9 @@ RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-align-tma
 # Increased to better utilize 80GB A100s while leaving headroom for spikes.
 BATCH_SIZE=4
 LEARNING_RATE=5e-4
-NUM_STEPS_BEFORE_DECAY=1000
-MAX_STEPS=3000
-SAVE_FREQ=1000
+NUM_STEPS_BEFORE_DECAY=10000
+MAX_STEPS=20000
+SAVE_FREQ=5000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
@@ -99,6 +98,8 @@ DFM_T_MIN=0.0
 DFM_T_MAX=${DFM_T_MAX}
 DFM_WEIGHT_CLIP=20.0
 DFM_TRAIN_MODE="flow"
+# Legacy DFM tokenization (enabled by default for this script)
+LEGACY_DFM_MODE=${LEGACY_DFM_MODE:-True}
 # MaskGIT iterations for inference config
 DFM_MASKGIT_NUM_STEPS=12
 # Note: mask/pad embeddings are now saved via LoRA modules_to_save (see finetune.py).
@@ -141,6 +142,7 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
     --dfm_train_mode ${DFM_TRAIN_MODE} \
     --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
+    --legacy_dfm_mode ${LEGACY_DFM_MODE} \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
     --run_id_note "smoke-2xA100-3k-align-tmax${DFM_T_MAX_TAG}--$(date +%Y%m%d_%H%M)" \

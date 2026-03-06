@@ -72,9 +72,9 @@ LOG_DIR="${BASE_DIR}/logs/eval_dfm_maskgit_tmax0.7/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-20k-tmax0p7--20260302_1313"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260305_1222"
 TASK_SUITE="libero_object"
-NUM_TRIALS=50
+NUM_TRIALS=2
 DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
@@ -88,14 +88,21 @@ DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
 NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
 SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+# Legacy eval mode (auto-enabled if checkpoint config requests it)
+LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
+# Action vocab overrides (needed for legacy DFM off-by-one)
+ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
 # Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
-GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-True}
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
 GRIPPER_TRACE=${GRIPPER_TRACE:-False}
 FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
 FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
 DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
+ACTION_AUDIT=${ACTION_AUDIT:-True}
+ACTION_AUDIT_EVERY=${ACTION_AUDIT_EVERY:-1}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -226,6 +233,9 @@ start_job() {
       --pretrained_checkpoint "${CKPT_PATH}" \
       --sync_model_logic ${SYNC_MODEL_LOGIC} \
       --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+      --legacy_eval_mode ${LEGACY_EVAL_MODE} \
+      --action_vocab_anchor ${ACTION_VOCAB_ANCHOR} \
+      --action_token_begin_idx ${ACTION_TOKEN_BEGIN_IDX} \
       --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
       --gripper_trace ${GRIPPER_TRACE} \
       --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
@@ -233,6 +243,8 @@ start_job() {
       --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
       --debug_log_every ${DEBUG_LOG_EVERY} \
       --gripper_audit ${GRIPPER_AUDIT} \
+      --action_audit ${ACTION_AUDIT} \
+      --action_audit_every ${ACTION_AUDIT_EVERY} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

@@ -89,6 +89,7 @@ class FinetuneConfig:
     use_discrete_diffusion: bool = True             # If True, uses discrete diffusion (instead of continuous) for action generation
     use_discrete_flow_matching: bool = False        # If True, uses discrete flow matching for action generation
     legacy_train_mode: Optional[bool] = None        # If True, use legacy prompt/tokenization/masks (forced for discrete diffusion)
+    legacy_dfm_mode: bool = False                   # If True, use legacy prompt/tokenization/masks for DFM (opt-in)
 
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
@@ -151,11 +152,49 @@ def resolve_torch_dtype(dtype_str: str) -> torch.dtype:
     raise ValueError(f"Unsupported torch_dtype: {dtype_str}")
 
 
-def apply_legacy_dd_overrides(cfg, model_config, processor) -> None:
-    """Force legacy DD config fields to match 2026-02-27 behavior."""
-    if not cfg.legacy_train_mode:
+def resolve_legacy_tokenization_mode(cfg: FinetuneConfig) -> Tuple[bool, Optional[bool]]:
+    """Resolve legacy tokenization mode across DD/DFM and enforce configuration constraints."""
+    legacy_train_mode_arg = cfg.legacy_train_mode
+    if cfg.legacy_dfm_mode and not cfg.use_discrete_flow_matching:
+        raise ValueError("legacy_dfm_mode is only supported when use_discrete_flow_matching=True.")
+    if cfg.use_discrete_flow_matching and cfg.legacy_train_mode:
+        raise ValueError("legacy_train_mode is only supported when use_discrete_diffusion=True.")
+
+    if cfg.use_discrete_diffusion:
+        if cfg.legacy_train_mode is False:
+            print("[legacy_train] forcing legacy_train_mode=True for discrete diffusion training")
+        cfg.legacy_train_mode = True
+    else:
+        if cfg.legacy_train_mode is None:
+            cfg.legacy_train_mode = False
+        elif cfg.legacy_train_mode:
+            raise ValueError("legacy_train_mode is only supported when use_discrete_diffusion=True.")
+
+    legacy_tokenization_mode = cfg.legacy_train_mode if cfg.use_discrete_diffusion else bool(cfg.legacy_dfm_mode)
+    return legacy_tokenization_mode, legacy_train_mode_arg
+
+
+def apply_legacy_tokenization_overrides(
+    cfg: FinetuneConfig,
+    model_config,
+    processor,
+    legacy_tokenization_mode: bool,
+) -> None:
+    """Force legacy config fields to match 2026-02-27 behavior for DD/DFM tokenization."""
+    if not legacy_tokenization_mode:
         return
-    print("[legacy_train] applying legacy DD config overrides (anchor=legacy)")
+    if cfg.use_discrete_flow_matching:
+        print("[legacy_dfm] applying legacy tokenization overrides (anchor=legacy)")
+        if processor.tokenizer.mask_token_id is None:
+            processor.tokenizer.add_special_tokens({"mask_token": "<mask>"})
+        if processor.tokenizer.mask_token_id is None:
+            raise ValueError(
+                "legacy_dfm_mode requires a mask token in the tokenizer. "
+                "Tried to add '<mask>' but mask_token_id is still None. "
+                "Re-save the tokenizer with a mask token or use a base model that includes one."
+            )
+    else:
+        print("[legacy_train] applying legacy tokenization overrides (anchor=legacy)")
     model_config.legacy_train_mode = True
     model_config.legacy_eval_mode = True
     model_config.action_vocab_anchor = "legacy"
@@ -164,16 +203,21 @@ def apply_legacy_dd_overrides(cfg, model_config, processor) -> None:
     expected_begin = int(processor.tokenizer.vocab_size - (n_bins + 1))
     if expected_begin != int(ACTION_TOKEN_BEGIN_IDX):
         raise ValueError(
-            "legacy_train_mode requires ACTION_TOKEN_BEGIN_IDX alignment. "
+            "legacy tokenization requires ACTION_TOKEN_BEGIN_IDX alignment. "
             f"Expected begin={expected_begin} from vocab_size and n_bins, "
             f"but ACTION_TOKEN_BEGIN_IDX={ACTION_TOKEN_BEGIN_IDX}. "
-            "Update the tokenizer/vocab or constants for legacy DD training."
+            "Update the tokenizer/vocab or constants for legacy training."
         )
 
 
+def apply_legacy_dd_overrides(cfg, model_config, processor) -> None:
+    """Backward-compatible wrapper for legacy DD overrides."""
+    apply_legacy_tokenization_overrides(cfg, model_config, processor, legacy_tokenization_mode=bool(cfg.legacy_train_mode))
+
+
 def validate_saved_checkpoint_config(cfg, checkpoint_dir: Path) -> None:
-    """Validate legacy DD config fields on disk after saving a checkpoint."""
-    if not (cfg.legacy_train_mode and cfg.use_discrete_diffusion):
+    """Validate legacy config fields on disk after saving a checkpoint."""
+    if not ((cfg.legacy_train_mode and cfg.use_discrete_diffusion) or (cfg.legacy_dfm_mode and cfg.use_discrete_flow_matching)):
         return
     cfg_path = checkpoint_dir / "config.json"
     if not cfg_path.exists():
@@ -181,8 +225,14 @@ def validate_saved_checkpoint_config(cfg, checkpoint_dir: Path) -> None:
     raw = json.load(open(cfg_path))
     cfg_dict = raw.get("vla", raw) if isinstance(raw, dict) else {}
     errors = []
-    if cfg_dict.get("use_discrete_diffusion") is not True:
-        errors.append("use_discrete_diffusion != True")
+    if cfg.use_discrete_flow_matching:
+        if cfg_dict.get("use_discrete_flow_matching") is not True:
+            errors.append("use_discrete_flow_matching != True")
+        if cfg_dict.get("use_discrete_diffusion") is True:
+            errors.append("use_discrete_diffusion should be False for DFM legacy checkpoints")
+    else:
+        if cfg_dict.get("use_discrete_diffusion") is not True:
+            errors.append("use_discrete_diffusion != True")
     if cfg_dict.get("legacy_train_mode") is not True:
         errors.append("legacy_train_mode != True")
     if cfg_dict.get("legacy_eval_mode") is not True:
@@ -385,7 +435,7 @@ def run_forward_pass(
     use_proprio,
     use_film,
     num_patches,
-    legacy_train_mode: bool = False,
+    legacy_tokenization_mode: bool = False,
     compute_diffusion_l1=False,
     num_diffusion_steps_train=None,
     use_discrete_diffusion=False,
@@ -415,7 +465,7 @@ def run_forward_pass(
         use_proprio (bool): Whether to use proprioceptive state as input.
         use_film (bool): Whether to use FiLM for better language following.
         num_patches (int): Number of vision patches.
-        legacy_train_mode (bool): Whether to use legacy action masking logic.
+        legacy_tokenization_mode (bool): Whether to use legacy action masking logic.
         compute_diffusion_l1 (bool): Whether to sample actions and compute L1 loss for diffusion (do this once every
                                     diffusion_sample_freq steps during training; do it every batch for validation)
         num_diffusion_steps_train (int): Number of diffusion steps for training (only used for diffusion).
@@ -471,7 +521,7 @@ def run_forward_pass(
     if use_discrete_diffusion or use_discrete_flow_matching:
         # For discrete diffusion, we only need to calculated masked action tokens
         ground_truth_token_ids = output.labels[:, 1:].to(device_id)
-    if legacy_train_mode:
+    if legacy_tokenization_mode:
         current_action_mask = get_current_action_mask(ground_truth_token_ids)
         next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
     else:
@@ -546,7 +596,7 @@ def run_forward_pass(
         if use_discrete_diffusion:
             # reset action mask to get correct hidden states for action portion
             ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
-            if legacy_train_mode:
+            if legacy_tokenization_mode:
                 current_action_mask = get_current_action_mask(ground_truth_token_ids)
                 next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
             else:
@@ -871,6 +921,7 @@ def run_validation(
     log_step,
     distributed_state,
     val_time_limit,
+    legacy_tokenization_mode: bool,
 ) -> None:
     """
     Compute validation set metrics for logging.
@@ -917,7 +968,7 @@ def run_validation(
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=num_patches,
-                legacy_train_mode=cfg.legacy_train_mode,
+                legacy_tokenization_mode=legacy_tokenization_mode,
                 compute_diffusion_l1=True,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
@@ -982,16 +1033,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_discrete_flow_matching and (cfg.use_l1_regression or cfg.use_diffusion)), (
         "DFM is not compatible with continuous action heads (L1 regression or diffusion)."
     )
-    legacy_train_mode_arg = cfg.legacy_train_mode
-    if cfg.use_discrete_diffusion:
-        if cfg.legacy_train_mode is False:
-            print("[legacy_train] forcing legacy_train_mode=True for discrete diffusion training")
-        cfg.legacy_train_mode = True
-    else:
-        if cfg.legacy_train_mode:
-            raise ValueError("legacy_train_mode is only supported when use_discrete_diffusion=True.")
-        if cfg.legacy_train_mode is None:
-            cfg.legacy_train_mode = False
+    legacy_tokenization_mode, legacy_train_mode_arg = resolve_legacy_tokenization_mode(cfg)
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
@@ -1023,13 +1065,16 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"\tPROPRIO_DIM: {PROPRIO_DIM}\n"
         f"\tACTION_PROPRIO_NORMALIZATION_TYPE: {ACTION_PROPRIO_NORMALIZATION_TYPE}"
     )
-    if cfg.legacy_train_mode:
-        if legacy_train_mode_arg is None:
-            print("[legacy_train] auto-enabled for discrete diffusion")
-        else:
-            print("[legacy_train] enabled: using legacy prompt/tokenization/masks")
-    elif legacy_train_mode_arg is False:
-        print("[legacy_train] disabled by explicit flag")
+    if cfg.use_discrete_diffusion:
+        if cfg.legacy_train_mode:
+            if legacy_train_mode_arg is None:
+                print("[legacy_train] auto-enabled for discrete diffusion")
+            else:
+                print("[legacy_train] enabled: using legacy prompt/tokenization/masks")
+        elif legacy_train_mode_arg is False:
+            print("[legacy_train] disabled by explicit flag")
+    elif cfg.legacy_dfm_mode:
+        print("[legacy_dfm] enabled: using legacy tokenizer/prompt/masks")
 
     # Two options:
     # (1) Base model is on Hugging Face Hub
@@ -1077,8 +1122,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         model_config = LocalOpenVLAConfig.from_pretrained(cfg.vla_path, trust_remote_code=True)
 
-    if cfg.legacy_train_mode:
-        apply_legacy_dd_overrides(cfg, model_config, processor)
+    if legacy_tokenization_mode:
+        apply_legacy_tokenization_overrides(cfg, model_config, processor, legacy_tokenization_mode)
         # Legacy path: warn (do not fail) if model vocab (after padding) doesn't match tokenizer.vocab_size.
         text_cfg = getattr(model_config, "text_config", None)
         text_vocab = getattr(text_cfg, "vocab_size", None) if text_cfg is not None else None
@@ -1099,15 +1144,28 @@ def finetune(cfg: FinetuneConfig) -> None:
     # For DFM, stamp explicit action vocab range into config to avoid eval mismatches.
     if cfg.use_discrete_flow_matching:
         n_bins = int(getattr(model_config, "n_action_bins", 256))
-        anchor = getattr(model_config, "action_vocab_anchor", "pad")
-        action_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor)
-        model_config.action_vocab_anchor = anchor
-        model_config.action_token_begin_idx = action_range.begin
-        print(
-            "[dfm_vocab] "
-            f"anchor={anchor} begin={action_range.begin} end={action_range.end} "
-            f"pad_id={action_range.pad_token_id} vocab_size={action_range.vocab_size}"
-        )
+        if legacy_tokenization_mode:
+            action_range = resolve_action_vocab(
+                processor.tokenizer,
+                n_bins,
+                "legacy",
+                ACTION_TOKEN_BEGIN_IDX,
+            )
+            print(
+                "[dfm_vocab] "
+                f"anchor=legacy begin={action_range.begin} end={action_range.end} "
+                f"pad_id={action_range.pad_token_id} vocab_size={action_range.vocab_size}"
+            )
+        else:
+            anchor = getattr(model_config, "action_vocab_anchor", "pad")
+            action_range = resolve_action_vocab(processor.tokenizer, n_bins, anchor)
+            model_config.action_vocab_anchor = anchor
+            model_config.action_token_begin_idx = action_range.begin
+            print(
+                "[dfm_vocab] "
+                f"anchor={anchor} begin={action_range.begin} end={action_range.end} "
+                f"pad_id={action_range.pad_token_id} vocab_size={action_range.vocab_size}"
+            )
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
@@ -1243,20 +1301,21 @@ def finetune(cfg: FinetuneConfig) -> None:
     n_action_bins = getattr(getattr(model_cfg, "config", None), "n_action_bins", None)
     action_vocab_anchor = getattr(getattr(model_cfg, "config", None), "action_vocab_anchor", "pad")
     action_token_begin_idx = getattr(getattr(model_cfg, "config", None), "action_token_begin_idx", None)
-    if cfg.legacy_train_mode:
+    if legacy_tokenization_mode:
         action_tokenizer = ActionTokenizer(
             processor.tokenizer,
             bins=n_action_bins if n_action_bins is not None else 256,
             action_vocab_anchor="legacy",
             legacy_bins=True,
+            action_token_begin_idx=ACTION_TOKEN_BEGIN_IDX,
         )
         expected_begin = int(processor.tokenizer.vocab_size - ((n_action_bins or 256) + 1))
         if expected_begin != ACTION_TOKEN_BEGIN_IDX:
             raise ValueError(
-                "legacy_train_mode requires ACTION_TOKEN_BEGIN_IDX alignment. "
+                "legacy tokenization requires ACTION_TOKEN_BEGIN_IDX alignment. "
                 f"Expected begin={expected_begin} from vocab_size and n_bins, "
                 f"but ACTION_TOKEN_BEGIN_IDX={ACTION_TOKEN_BEGIN_IDX}. "
-                "Update the tokenizer/vocab or constants for legacy DD training."
+                "Update the tokenizer/vocab or constants for legacy training."
             )
     else:
         action_tokenizer = ActionTokenizer(
@@ -1311,7 +1370,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         prompt_builder_fn=PurePromptBuilder,
         use_wrist_image=use_wrist_image,
         use_proprio=cfg.use_proprio,
-        legacy_mode=cfg.legacy_train_mode,
+        legacy_mode=legacy_tokenization_mode,
     )
     train_dataset = RLDSDataset(
         cfg.data_root_dir,
@@ -1400,7 +1459,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=NUM_PATCHES,
-                legacy_train_mode=cfg.legacy_train_mode,
+                legacy_tokenization_mode=legacy_tokenization_mode,
                 compute_diffusion_l1=compute_diffusion_l1,
                 num_diffusion_steps_train=cfg.num_diffusion_steps_train if cfg.use_diffusion else None,
                 use_discrete_diffusion=cfg.use_discrete_diffusion,
@@ -1492,6 +1551,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     log_step=log_step,
                     distributed_state=distributed_state,
                     val_time_limit=cfg.val_time_limit,
+                    legacy_tokenization_mode=legacy_tokenization_mode,
                 )
                 # Set model back to training mode after validation
                 vla.train()

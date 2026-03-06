@@ -127,6 +127,7 @@ start_job() {
       --num_images_in_input 2 \
       --use_proprio True \
       --topk_filter_thres 0.0 \
+      --gripper_debug_raw False \
       --dfm_debug ${DFM_DEBUG} \
       --dfm_debug_level ${DFM_DEBUG_LEVEL} \
       --dfm_fail_fast ${DFM_FAIL_FAST} \
