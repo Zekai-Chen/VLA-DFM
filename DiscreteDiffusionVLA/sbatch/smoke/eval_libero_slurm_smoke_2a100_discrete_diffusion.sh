@@ -90,6 +90,8 @@ FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
 DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
+ACTION_AUDIT=${ACTION_AUDIT:-True}
+ACTION_AUDIT_EVERY=${ACTION_AUDIT_EVERY:-1}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -238,6 +240,8 @@ start_job() {
       --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
       --debug_log_every ${DEBUG_LOG_EVERY} \
       --gripper_audit ${GRIPPER_AUDIT} \
+      --action_audit ${ACTION_AUDIT} \
+      --action_audit_every ${ACTION_AUDIT_EVERY} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \
