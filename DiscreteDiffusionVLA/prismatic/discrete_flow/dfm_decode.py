@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Tuple
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -11,6 +13,19 @@ from .dfm_schedule import kappa, kappa_dot, time_grid
 from . import parallel_decode
 
 DFM_DECODE_REV = "2026-03-03-maskgit-12step-remask"
+
+
+def _invert_kappa(kappa_vals: torch.Tensor, schedule: str) -> torch.Tensor:
+    kappa_vals = kappa_vals.clamp(min=0.0, max=1.0)
+    if schedule == "sin":
+        return (2.0 / math.pi) * torch.asin(kappa_vals)
+    if schedule == "cosine":
+        return (2.0 / math.pi) * torch.acos((1.0 - kappa_vals).clamp(min=0.0, max=1.0))
+    if schedule == "linear":
+        return kappa_vals
+    if schedule == "poly2":
+        return torch.sqrt(kappa_vals)
+    raise ValueError(f"Unknown DFM schedule: {schedule}")
 
 
 @torch.no_grad()
@@ -37,6 +52,7 @@ def dfm_decode(
     clamp_values: Optional[torch.LongTensor] = None,
     debug_level: int = 0,
     decode_mode: str = "ctmc",
+    log_mask_stats: bool = False,
 ) -> Tuple[torch.LongTensor, torch.Tensor, dict]:
     """Run CTMC hazard/tau-leaping updates for discrete flow matching.
 
@@ -104,6 +120,24 @@ def dfm_decode(
             "dfm_step_masked_count": pd_stats.get("step_masked_count", []),
             "dfm_maskgit_num_steps": maskgit_num_steps,
         }
+        if log_mask_stats and n_action_positions > 0:
+            step_masked = pd_stats.get("step_masked_count", [])
+            mask_frac_per_step = [float(m) / float(n_action_positions) for m in step_masked]
+            kappa_proxy = [1.0 - mf for mf in mask_frac_per_step]
+            if kappa_proxy:
+                kappa_tensor = torch.tensor(kappa_proxy, device=device, dtype=torch.float32)
+                t_proxy = _invert_kappa(kappa_tensor, schedule=schedule).cpu().tolist()
+            else:
+                t_proxy = []
+            stats.update(
+                {
+                    "dfm_mask_frac_per_step": mask_frac_per_step,
+                    "dfm_kappa_proxy_per_step": kappa_proxy,
+                    "dfm_t_proxy_per_step": t_proxy,
+                    "dfm_t_proxy_is_derived": True,
+                    "dfm_t_proxy_schedule": schedule,
+                }
+            )
         if debug_level >= 1:
             stats["dfm_unresolved_count"] = pd_stats.get("step_masked_count", [])
             stats["dfm_mask_len_per_step"] = pd_stats.get("mask_len_per_step", [])
@@ -128,10 +162,11 @@ def dfm_decode(
         t = t_grid[step]
         # Exit if no unresolved positions remain
         unresolved = (cur == mask_token_id) & (~clamp_mask)
-        if debug_level >= 1:
+        if debug_level >= 1 or log_mask_stats:
             unresolved_count = int(unresolved.sum().item())
-            debug_unresolved.append(unresolved_count)
             step_masked_count.append(unresolved_count)
+            if debug_level >= 1:
+                debug_unresolved.append(unresolved_count)
         if early_exit and unresolved.sum().item() == 0:
             early_exit_iter = step
             break
@@ -301,6 +336,18 @@ def dfm_decode(
         "dfm_step_masked_count": step_masked_count,
         "dfm_maskgit_num_steps": maskgit_num_steps if decode_mode == "maskgit" else None,
     }
+    if log_mask_stats and n_action_positions > 0:
+        realized_steps = len(num_changed_per_step)
+        t_grid_used = t_grid[:realized_steps] if realized_steps > 0 else t_grid[:0]
+        kappa_grid = kappa(t_grid_used, schedule=schedule) if t_grid_used.numel() > 0 else t_grid_used
+        mask_frac_per_step = [float(m) / float(n_action_positions) for m in step_masked_count]
+        stats.update(
+            {
+                "dfm_t_grid": t_grid_used.detach().cpu().tolist(),
+                "dfm_kappa_grid": kappa_grid.detach().cpu().tolist(),
+                "dfm_mask_frac_per_step": mask_frac_per_step,
+            }
+        )
     if debug_level >= 1:
         stats["dfm_unresolved_count"] = debug_unresolved
         if decode_mode == "maskgit":
