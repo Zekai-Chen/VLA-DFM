@@ -23,5 +23,4 @@ Fix_offset_3k_DFM_test/0304_1951/
 dep/
 Fix_offset_3k_DFM_test_Action_Audit/
 eval-results/DFM_eval_latest_20k_model_0305_1716/0305_1716/
-.github/workflows/
 eval-results/DFM_eval_20k_gripper_debug_false_model_0305_1930/0305_1930/
