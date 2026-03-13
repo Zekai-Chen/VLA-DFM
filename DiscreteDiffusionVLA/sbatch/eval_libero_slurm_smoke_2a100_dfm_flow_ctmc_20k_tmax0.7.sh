@@ -1,0 +1,268 @@
+#!/bin/bash
+#SBATCH --account=p32222
+#SBATCH --partition=gengpu
+#SBATCH --gres=gpu:a100:1
+#SBATCH --nodes=1
+#SBATCH --mem=60G
+#SBATCH --time=47:00:00
+#SBATCH --job-name=openvla-eval-dfm-ctmc-tmax0.7
+#SBATCH --output=logs/openvla_eval_dfm_ctmc_tmax0.7_%j.out
+#SBATCH --error=logs/openvla_eval_dfm_ctmc_tmax0.7_%j.err
+
+set -euo pipefail
+
+# --- Environment (cluster-standard) ---
+module load gcc/12.4.0-gcc-8.5.0 && module load cuda/12.4.0-gcc-12.4.0
+module load git
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+REPO_ROOT_DEFAULT=${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}
+REPO_ROOT=${REPO_ROOT:-${REPO_ROOT_DEFAULT}}
+
+# Resolve repo root (search upwards for expected scripts)
+if [ ! -f "${REPO_ROOT}/vla-scripts/finetune.py" ] && [ ! -f "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" ]; then
+  SEARCH_DIR="${REPO_ROOT}"
+  for _ in 1 2 3 4; do
+    SEARCH_DIR=$(dirname "${SEARCH_DIR}")
+    if [ -f "${SEARCH_DIR}/vla-scripts/finetune.py" ] || [ -f "${SEARCH_DIR}/experiments/robot/libero/run_libero_eval.py" ]; then
+      REPO_ROOT="${SEARCH_DIR}"
+      break
+    fi
+  done
+fi
+
+if [ ! -d "${REPO_ROOT}" ] || { [ ! -f "${REPO_ROOT}/vla-scripts/finetune.py" ] && [ ! -f "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" ]; }; then
+  echo "ERROR: Repo root not found or missing expected scripts at ${REPO_ROOT}" 1>&2
+  exit 1
+fi
+cd "${REPO_ROOT}"
+
+# Activate a virtualenv if available (robust check)
+VENV_ACTIVATE=${VENV_ACTIVATE:-"${REPO_ROOT}/.venv/bin/activate"}
+if [ ! -f "${VENV_ACTIVATE}" ]; then
+  echo "ERROR: Virtualenv activate script not found at ${VENV_ACTIVATE}." 1>&2
+  ls -la "${REPO_ROOT}"
+  exit 1
+fi
+# shellcheck disable=SC1091
+source "${VENV_ACTIVATE}"
+WANDB_ENTITY=${WANDB_ENTITY:-a10v-1}
+WANDB_PROJECT=${WANDB_PROJECT:-VLA-DFM}
+export WANDB_ENTITY WANDB_PROJECT
+export LIBERO_CONFIG_PATH=/projects/p32222/aTester/VLA-DFM/DiscreteDiffusionVLA/.libero
+
+# --- Basic diagnostics ---
+mkdir -p logs
+
+echo "SLURM_JOBID=${SLURM_JOBID:-}"
+echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
+echo "SLURM_JOB_PARTITION=${SLURM_JOB_PARTITION:-}"
+echo "SLURM_NNODES=${SLURM_NNODES:-}"
+echo "SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-}"
+echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-}"
+export NCCL_IB_DISABLE=1
+which python
+python -V || true
+nvcc --version || true
+python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.device_count())" || true
+
+# --- Base path + logging ---
+BASE_DIR="/scratch/ywn1043/VLA-DFM"
+DFM_T_MAX=0.7
+DFM_T_MAX_TAG=0p7
+RUN_ROOT_DIR="${RUN_ROOT_DIR:-${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax${DFM_T_MAX_TAG}}"
+LOG_DIR="${BASE_DIR}/logs/eval_dfm_ctmc_tmax${DFM_T_MAX_TAG}/$(date +'%m%d_%H%M')"
+mkdir -p "$LOG_DIR"
+
+# --- Smoke eval params ---
+TASK_SUITE="libero_object"
+NUM_TRIALS=2
+DFM_DEBUG=${DFM_DEBUG:-True}
+DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
+DFM_LOG_MASK_STATS=${DFM_LOG_MASK_STATS:-True}
+DFM_LOG_MASK_EVERY=${DFM_LOG_MASK_EVERY:-1}
+DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
+DFM_SCHEDULE=${DFM_SCHEDULE:-cosine}
+DFM_TIME_EPS=${DFM_TIME_EPS:-1e-3}
+DFM_DECODE_MODE=${DFM_DECODE_MODE:-ctmc}
+DFM_ADAPTIVE_STEP=${DFM_ADAPTIVE_STEP:-True}
+DFM_STEP_MIN=${DFM_STEP_MIN:-1e-4}
+DFM_STEP_MAX=${DFM_STEP_MAX:-0.2}
+DFM_TEMPERATURE=${DFM_TEMPERATURE:-1.0}
+DFM_TEMPERATURE_ANNEAL=${DFM_TEMPERATURE_ANNEAL:-none}
+DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
+
+# Prefer repo model code/config by default while debugging
+SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
+USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
+LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
+ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
+ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
+GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
+GRIPPER_TRACE=${GRIPPER_TRACE:-False}
+FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
+FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
+DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
+DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
+GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
+ACTION_AUDIT=${ACTION_AUDIT:-True}
+ACTION_AUDIT_EVERY=${ACTION_AUDIT_EVERY:-1}
+
+# --- Resolve checkpoint path ---
+SEARCH_ROOT="${CHECKPOINT_ROOT:-${RUN_ROOT_DIR}}"
+CKPT_PATH=""
+if [[ -f "${SEARCH_ROOT}/config.json" ]]; then
+  CKPT_PATH="${SEARCH_ROOT}"
+else
+  if [[ -d "${SEARCH_ROOT}" ]]; then
+    CKPT_PATH=$(ls -td "${SEARCH_ROOT}"/*/ 2>/dev/null | while read -r d; do
+      if [[ -f "${d%/}/config.json" ]]; then
+        echo "${d%/}"
+        break
+      fi
+    done)
+  fi
+fi
+
+if [[ -z "${CKPT_PATH}" ]]; then
+  echo "ERROR: Could not resolve checkpoint path from CHECKPOINT_ROOT='${CHECKPOINT_ROOT:-}' or RUN_ROOT_DIR='${RUN_ROOT_DIR}'." 1>&2
+  exit 1
+fi
+export CKPT_PATH
+
+python - <<'PY'
+import json, os, sys
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping config validation.")
+    sys.exit(0)
+cfg_path = os.path.join(ckpt, "config.json")
+if not os.path.exists(cfg_path):
+    print(f"WARNING: config.json not found at {cfg_path}")
+    sys.exit(0)
+cfg = json.load(open(cfg_path))
+print("Checkpoint config summary:")
+for k in [
+    "use_discrete_flow_matching",
+    "use_discrete_diffusion",
+    "use_mask_token",
+    "dfm_schedule",
+    "dfm_loss_mode",
+    "dfm_train_mode",
+    "dfm_time_eps",
+    "dfm_t_min",
+    "dfm_t_max",
+    "dfm_weight_clip",
+]:
+    print(f"  {k}: {cfg.get(k)}")
+PY
+
+python - <<'PY'
+import os
+from transformers import AutoProcessor
+
+ckpt = os.environ.get("CKPT_PATH")
+if not ckpt:
+    print("CKPT_PATH not set; skipping tokenizer validation.")
+    raise SystemExit(0)
+
+try:
+    processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+    tok = processor.tokenizer
+    print("Tokenizer summary:")
+    print("  vocab_size:", tok.vocab_size)
+    print("  vocab_len:", len(tok))
+    print("  pad_token_id:", tok.pad_token_id)
+    print("  mask_token_id:", tok.mask_token_id)
+    if tok.pad_token_id is None or tok.mask_token_id is None:
+        print("WARNING: pad_token_id or mask_token_id is None.")
+    elif tok.pad_token_id >= len(tok) or tok.mask_token_id >= len(tok):
+        print("WARNING: pad/mask token id out of range for len(tokenizer).")
+    cfg = getattr(processor, "config", None)
+except Exception:
+    import json
+    cfg = json.load(open(os.path.join(ckpt, "config.json")))
+    tok = None
+
+def _get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if hasattr(cfg, key):
+        return getattr(cfg, key)
+    return cfg.get(key, default)
+
+anchor = _get(cfg, "action_vocab_anchor", "pad")
+n_bins = _get(cfg, "n_action_bins", 256)
+begin_override = _get(cfg, "action_token_begin_idx", None)
+pad_id = _get(cfg, "pad_token_id", None)
+vocab_len = len(tok) if tok is not None else None
+
+if begin_override is not None:
+    action_begin = int(begin_override)
+    action_end = int(action_begin + int(n_bins))
+elif anchor == "pad" and pad_id is not None:
+    action_end = int(pad_id)
+    action_begin = int(action_end - int(n_bins))
+elif anchor == "vocab_size" and vocab_len is not None:
+    action_end = int(vocab_len)
+    action_begin = int(action_end - int(n_bins))
+else:
+    action_begin = None
+    action_end = None
+
+print("Action vocab summary:")
+print("  anchor:", anchor)
+print("  action_token_begin_idx:", begin_override)
+print("  action_range:", (action_begin, action_end))
+PY
+
+# --- Launch eval (single job) ---
+CUDA_VISIBLE_DEVICES=0 \
+  python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
+    --pretrained_checkpoint "${CKPT_PATH}" \
+    --sync_model_logic ${SYNC_MODEL_LOGIC} \
+    --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+    --legacy_eval_mode ${LEGACY_EVAL_MODE} \
+    --action_vocab_anchor ${ACTION_VOCAB_ANCHOR} \
+    --action_token_begin_idx ${ACTION_TOKEN_BEGIN_IDX} \
+    --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+    --gripper_trace ${GRIPPER_TRACE} \
+    --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
+    --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+    --debug_log_every ${DEBUG_LOG_EVERY} \
+    --gripper_audit ${GRIPPER_AUDIT} \
+    --action_audit ${ACTION_AUDIT} \
+    --action_audit_every ${ACTION_AUDIT_EVERY} \
+    --task_suite_name ${TASK_SUITE} \
+    --num_trials_per_task ${NUM_TRIALS} \
+    --use_l1_regression False \
+    --use_diffusion False \
+    --use_discrete_diffusion False \
+    --use_discrete_flow_matching True \
+    --use_film False \
+    --center_crop True \
+    --num_images_in_input 2 \
+    --num_open_loop_steps 8 \
+    --use_proprio True \
+    --topk_filter_thres 0.0 \
+    --dfm_debug ${DFM_DEBUG} \
+    --dfm_debug_level ${DFM_DEBUG_LEVEL} \
+    --dfm_log_mask_stats ${DFM_LOG_MASK_STATS} \
+    --dfm_log_mask_every ${DFM_LOG_MASK_EVERY} \
+    --dfm_fail_fast ${DFM_FAIL_FAST} \
+    --dfm_num_steps ${DFM_NUM_STEPS} \
+    --dfm_schedule ${DFM_SCHEDULE} \
+    --dfm_time_eps ${DFM_TIME_EPS} \
+    --dfm_decode_mode ${DFM_DECODE_MODE} \
+    --dfm_adaptive_step ${DFM_ADAPTIVE_STEP} \
+    --dfm_step_min ${DFM_STEP_MIN} \
+    --dfm_step_max ${DFM_STEP_MAX} \
+    --dfm_temperature ${DFM_TEMPERATURE} \
+    --dfm_temperature_anneal ${DFM_TEMPERATURE_ANNEAL} \
+    --dfm_early_exit ${DFM_EARLY_EXIT} \
+    --local_log_dir "${LOG_DIR}" \
+    --use_wandb True \
+    --wandb_entity "${WANDB_ENTITY}" \
+    --wandb_project "${WANDB_PROJECT}" \
+  > "$LOG_DIR/eval_ctmc.log" 2>&1
