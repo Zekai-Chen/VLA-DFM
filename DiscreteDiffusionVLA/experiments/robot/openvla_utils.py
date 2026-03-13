@@ -972,6 +972,7 @@ def get_vla_action(
     return_debug: bool = False,
     dfm_debug_level: int = 1,
     dfm_decode_mode: str = "ctmc",
+    dfm_log_mask_stats: bool = False,
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -1176,6 +1177,7 @@ def get_vla_action(
                     return_debug=True,
                     dfm_debug_level=dfm_debug_level,
                     dfm_decode_mode=dfm_decode_mode,
+                    dfm_log_mask_stats=dfm_log_mask_stats,
                 )
                 if debug is not None:
                     try:
@@ -1234,6 +1236,7 @@ def get_vla_action(
                     dfm_clamp_mask=clamp_mask,
                     dfm_clamp_values=clamp_values,
                     dfm_decode_mode=dfm_decode_mode,
+                    dfm_log_mask_stats=dfm_log_mask_stats,
                 )
         else:
             # Custom action head for continuous actions
@@ -1269,6 +1272,7 @@ def get_vla_action(
                     return_debug=True,
                     dfm_debug_level=dfm_debug_level,
                     dfm_decode_mode=dfm_decode_mode,
+                    dfm_log_mask_stats=dfm_log_mask_stats,
                 )
             else:
                 action, _ = vla.predict_action(
@@ -1300,6 +1304,7 @@ def get_vla_action(
                     dfm_clamp_mask=clamp_mask,
                     dfm_clamp_values=clamp_values,
                     dfm_decode_mode=dfm_decode_mode,
+                    dfm_log_mask_stats=dfm_log_mask_stats,
                 )
 
     # Return action chunk as list of actions

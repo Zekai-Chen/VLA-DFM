@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --account=p32222
 #SBATCH --partition=gengpu              # GPU partition (48 h max)
-#SBATCH --gres=gpu:a100:1               # 2×A100 GPUs
+#SBATCH --gres=gpu:a100:2               # 2×A100 GPUs
+#SBATCH --constraint=sxm
 #SBATCH --nodes=1
-#SBATCH --mem=60G
+#SBATCH --mem=120G
 #SBATCH --time=47:00:00                 # smoke run
-#SBATCH --job-name=openvla-ft-smoke-3k-align-tmax0p7
-#SBATCH --output=logs/openvla_ft_smoke_3k_align_tmax0p7_%j.out
-#SBATCH --error=logs/openvla_ft_smoke_3k_align_tmax0p7_%j.err
+#SBATCH --job-name=openvla-ft-smoke-20k-tmax0p7
+#SBATCH --output=logs/openvla_ft_smoke_20k_tmax0p7_%j.out
+#SBATCH --error=logs/openvla_ft_smoke_20k_tmax0p7_%j.err
 
 set -euo pipefail
 
@@ -69,38 +70,42 @@ export WANDB_DISABLED=false
 DFM_T_MAX=0.7
 DFM_T_MAX_TAG=0p7
 
-export WANDB_NAME="openvla_ft_smoke_3k_align_tmax${DFM_T_MAX_TAG}_${SLURM_JOBID:-local}"
+export WANDB_NAME="openvla_ft_smoke_20k_tmax${DFM_T_MAX_TAG}_${SLURM_JOBID:-local}"
 
 # --- Job params (adjust paths if needed) ---
 BASE_DIR="/scratch/ywn1043/VLA-DFM"
 VLA_PATH="${BASE_DIR}/models/openvla-7b"
 DATA_ROOT="${BASE_DIR}/RLDS/modified_libero_rlds"
 DATASET_NAME="libero_object_no_noops"
-RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax${DFM_T_MAX_TAG}"
+RUN_ROOT_DIR="${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax${DFM_T_MAX_TAG}"
 
 # --- Training params (short) ---
 # Increased to better utilize 80GB A100s while leaving headroom for spikes.
 BATCH_SIZE=4
 LEARNING_RATE=5e-4
-NUM_STEPS_BEFORE_DECAY=10000
+NUM_STEPS_BEFORE_DECAY=1000
 MAX_STEPS=20000
-SAVE_FREQ=5000
+SAVE_FREQ=1000
 SHUFFLE_BUFFER_SIZE=10000
 LORA_RANK=16
 TORCH_DTYPE="bfloat16"
+# Explicit legacy DFM behavior (prompt/tokenization/masks)
+LEGACY_DFM_MODE=${LEGACY_DFM_MODE:-"True"}
+if [[ "${LEGACY_DFM_MODE}" != "True" ]]; then
+  echo "ERROR: LEGACY_DFM_MODE must be 'True' for legacy DFM 20k." 1>&2
+  exit 1
+fi
 
 # --- DFM params ---
 USE_DFM=true
-DFM_SCHEDULE="sin"
+DFM_SCHEDULE="cosine"
 DFM_LOSS_MODE="generalized_kl"
 DFM_TIME_EPS=1e-3
 DFM_T_MIN=0.0
 DFM_T_MAX=${DFM_T_MAX}
 DFM_WEIGHT_CLIP=20.0
 DFM_TRAIN_MODE="flow"
-# Legacy DFM tokenization (enabled by default for this script)
-LEGACY_DFM_MODE=${LEGACY_DFM_MODE:-True}
-# MaskGIT iterations for inference config
+# MaskGIT iterations for inference config (CTMC is selected at eval time via --dfm_decode_mode ctmc)
 DFM_MASKGIT_NUM_STEPS=12
 # Note: mask/pad embeddings are now saved via LoRA modules_to_save (see finetune.py).
 # Eval parity (finetune does not consume these flags)
@@ -142,13 +147,10 @@ if [[ "${USE_DFM}" == "true" ]]; then
     --dfm_weight_clip ${DFM_WEIGHT_CLIP} \
     --dfm_train_mode ${DFM_TRAIN_MODE} \
     --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
-    --dfm_log_mask_stats True \
-    --dfm_log_mask_every 1 \
-    --dfm_log_mask_max_samples 5000 \
     --legacy_dfm_mode ${LEGACY_DFM_MODE} \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
-    --run_id_note "smoke-2xA100-3k-align-tmax${DFM_T_MAX_TAG}--$(date +%Y%m%d_%H%M)" \
+    --run_id_note "smoke-2xA100-20k-tmax${DFM_T_MAX_TAG}--$(date +%Y%m%d_%H%M)" \
     | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 else
   torchrun --standalone --nnodes 1 --nproc-per-node ${NPROC} vla-scripts/finetune.py \
@@ -175,6 +177,6 @@ else
     --torch_dtype "${TORCH_DTYPE}" \
     --wandb_entity "a10v-1" \
     --wandb_project "VLA-DFM" \
-    --run_id_note "smoke-2xA100-3k-align--$(date +%Y%m%d_%H%M)" \
+    --run_id_note "smoke-2xA100-20k--$(date +%Y%m%d_%H%M)" \
     | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 fi

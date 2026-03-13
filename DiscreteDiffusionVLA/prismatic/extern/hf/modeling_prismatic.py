@@ -291,6 +291,7 @@ class PrismaticCausalLMOutputWithPast(ModelOutput):
 
     # Additions for DFM logging
     dfm_stats: Optional[Dict[str, torch.FloatTensor]] = None
+    dfm_trace: Optional[Dict[str, torch.FloatTensor]] = None
 
 
 class PrismaticPreTrainedModel(PreTrainedModel):
@@ -867,6 +868,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_weight_clip: float = 20.0,
         dfm_train_mode: Optional[str] = None,
         dfm_t_bias_alpha: Optional[float] = None,
+        dfm_log_mask_stats: bool = False,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -885,6 +887,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         dfm_weight = None
         multimodal_labels = None
         dfm_stats = None
+        dfm_trace = None
         dfm_action_token_count = None
         dfm_t = None
         multimodal_x1_labels = None
@@ -1244,6 +1247,13 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 else:
                     mask_frac = dfm_loss_mask.sum(dim=1) / dfm_action_token_count.clamp(min=1.0)
                 mask_ratio = (1.0 - kappa_t).clamp(min=0.0, max=1.0)
+                if dfm_log_mask_stats:
+                    dfm_t_trace = dfm_t if dfm_t is not None else torch.full_like(kappa_t, float("nan"))
+                    dfm_trace = {
+                        "t": dfm_t_trace.detach(),
+                        "kappa": kappa_t.detach(),
+                        "mask_frac": mask_frac.detach(),
+                    }
                 dfm_stats = {
                     "kappa_mean": kappa_t.mean().detach(),
                     "t_mean": dfm_t.mean().detach() if dfm_t is not None else torch.tensor(float("nan")),
@@ -1354,6 +1364,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             projector_features=projected_patch_embeddings,
             labels=labels if labels is not None else None,
             dfm_stats=dfm_stats,
+            dfm_trace=dfm_trace,
         )
 
     # === GenerationMixin Methods ===
@@ -1824,6 +1835,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         return_debug: bool = False,
         dfm_debug_level: int = 1,
         dfm_decode_mode: str = "ctmc",
+        dfm_log_mask_stats: bool = False,
     ):
         """CTMC discrete flow matching prediction."""
         assert input_ids is not None, "Input IDs must be provided for DFM prediction!"
@@ -1933,6 +1945,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 clamp_values=clamp_values,
                 debug_level=dfm_debug_level if return_debug else 0,
                 decode_mode=dfm_decode_mode,
+                log_mask_stats=dfm_log_mask_stats,
             )
             # Telemetry: fraction of decoded tokens in action vocab range
             action_begin, action_end, n_bins = self._action_vocab_range()
@@ -2034,6 +2047,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         return_debug: bool = False,
         dfm_debug_level: int = 1,
         dfm_decode_mode: str = "ctmc",
+        dfm_log_mask_stats: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -2164,6 +2178,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     return_debug=return_debug,
                     dfm_debug_level=dfm_debug_level,
                     dfm_decode_mode=dfm_decode_mode,
+                    dfm_log_mask_stats=dfm_log_mask_stats,
                 )
                 if return_debug:
                     normalized_actions, actions_hidden_states, debug = dfm_result

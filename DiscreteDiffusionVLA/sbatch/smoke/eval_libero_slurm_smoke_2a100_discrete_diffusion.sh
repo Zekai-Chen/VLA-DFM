@@ -72,7 +72,7 @@ LOG_DIR="${BASE_DIR}/logs/eval_smoke/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-dd/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-3k-align--20260304_1617"
+CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-dd/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-dd-legacy-3k-align--20260305_1400"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 # Optional action vocab overrides (empty = use checkpoint config)
@@ -90,6 +90,8 @@ FORCE_GRIPPER_STEPS=${FORCE_GRIPPER_STEPS:-0}
 DEBUG_LOG_ALL_METRICS=${DEBUG_LOG_ALL_METRICS:-True}
 DEBUG_LOG_EVERY=${DEBUG_LOG_EVERY:-1}
 GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
+ACTION_AUDIT=${ACTION_AUDIT:-True}
+ACTION_AUDIT_EVERY=${ACTION_AUDIT_EVERY:-1}
 
 # Use 1 job per GPU for smoke
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
@@ -238,6 +240,8 @@ start_job() {
       --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
       --debug_log_every ${DEBUG_LOG_EVERY} \
       --gripper_audit ${GRIPPER_AUDIT} \
+      --action_audit ${ACTION_AUDIT} \
+      --action_audit_every ${ACTION_AUDIT_EVERY} \
       --task_suite_name ${TASK_SUITE} \
       --num_trials_per_task ${NUM_TRIALS} \
       --use_l1_regression False \

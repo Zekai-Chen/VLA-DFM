@@ -5,9 +5,9 @@
 #SBATCH --nodes=1
 #SBATCH --mem=60G
 #SBATCH --time=47:00:00
-#SBATCH --job-name=openvla-eval-dfm-maskgit-tmax0.7
-#SBATCH --output=logs/openvla_eval_dfm_maskgit_tmax0.7_%j.out
-#SBATCH --error=logs/openvla_eval_dfm_maskgit_tmax0.7_%j.err
+#SBATCH --job-name=openvla-eval-dfm-ctmc-tmax0.7
+#SBATCH --output=logs/openvla_eval_dfm_ctmc_tmax0.7_%j.out
+#SBATCH --error=logs/openvla_eval_dfm_ctmc_tmax0.7_%j.err
 
 set -euo pipefail
 
@@ -68,32 +68,38 @@ python -c "import torch; print('CUDA:', torch.version.cuda, 'GPUs:', torch.cuda.
 
 # --- Base path + logging ---
 BASE_DIR="/scratch/ywn1043/VLA-DFM"
-LOG_DIR="${BASE_DIR}/logs/eval_dfm_maskgit_tmax0.7/$(date +'%m%d_%H%M')"
+DFM_T_MAX=0.7
+DFM_T_MAX_TAG=0p7
+RUN_ROOT_DIR="${RUN_ROOT_DIR:-${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax${DFM_T_MAX_TAG}}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-20k-tmax0p7--20260312_2031}"
+LOG_DIR="${BASE_DIR}/logs/eval_dfm_ctmc_tmax${DFM_T_MAX_TAG}/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
 # --- Smoke eval params ---
-CHECKPOINT_ROOT="/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-3k-align-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-3k-align-tmax0p7--20260305_1222"
 TASK_SUITE="libero_object"
 NUM_TRIALS=2
 DFM_DEBUG=${DFM_DEBUG:-True}
 DFM_DEBUG_LEVEL=${DFM_DEBUG_LEVEL:-2}
+DFM_LOG_MASK_STATS=${DFM_LOG_MASK_STATS:-True}
+DFM_LOG_MASK_EVERY=${DFM_LOG_MASK_EVERY:-1}
 DFM_FAIL_FAST=${DFM_FAIL_FAST:-False}
-DFM_NUM_STEPS=${DFM_NUM_STEPS:-0}
-DFM_MASKGIT_NUM_STEPS=${DFM_MASKGIT_NUM_STEPS:-0}
-DFM_MASKGIT_SCHEDULE=${DFM_MASKGIT_SCHEDULE:-auto}
-DFM_TEMPERATURE=${DFM_TEMPERATURE:-0.0}
-DFM_SCHEDULE=${DFM_SCHEDULE:-auto}
+DFM_NUM_STEPS=${DFM_NUM_STEPS:-128}
+DFM_SCHEDULE=${DFM_SCHEDULE:-cosine}
+DFM_TIME_EPS=${DFM_TIME_EPS:-1e-3}
+DFM_DECODE_MODE=${DFM_DECODE_MODE:-ctmc}
+DFM_ADAPTIVE_STEP=${DFM_ADAPTIVE_STEP:-True}
+DFM_STEP_MIN=${DFM_STEP_MIN:-1e-4}
+DFM_STEP_MAX=${DFM_STEP_MAX:-0.2}
+DFM_TEMPERATURE=${DFM_TEMPERATURE:-1.0}
+DFM_TEMPERATURE_ANNEAL=${DFM_TEMPERATURE_ANNEAL:-none}
 DFM_EARLY_EXIT=${DFM_EARLY_EXIT:-False}
-DFM_DECODE_MODE=${DFM_DECODE_MODE:-maskgit}
-NUM_OPEN_LOOP_STEPS=${NUM_OPEN_LOOP_STEPS:-8}
+
+# Prefer repo model code/config by default while debugging
 SYNC_MODEL_LOGIC=${SYNC_MODEL_LOGIC:-True}
 USE_CHECKPOINT_DEFAULTS=${USE_CHECKPOINT_DEFAULTS:-True}
-# Legacy eval mode (auto-enabled if checkpoint config requests it)
 LEGACY_EVAL_MODE=${LEGACY_EVAL_MODE:-True}
-# Action vocab overrides (needed for legacy DFM off-by-one)
 ACTION_VOCAB_ANCHOR=${ACTION_VOCAB_ANCHOR:-legacy}
 ACTION_TOKEN_BEGIN_IDX=${ACTION_TOKEN_BEGIN_IDX:-31743}
-# Debug: bypass gripper postprocess (binarize/invert) to detect mapping issues.
 GRIPPER_DEBUG_RAW=${GRIPPER_DEBUG_RAW:-False}
 GRIPPER_TRACE=${GRIPPER_TRACE:-False}
 FORCE_GRIPPER_VALUE=${FORCE_GRIPPER_VALUE:-}
@@ -104,24 +110,24 @@ GRIPPER_AUDIT=${GRIPPER_AUDIT:-True}
 ACTION_AUDIT=${ACTION_AUDIT:-True}
 ACTION_AUDIT_EVERY=${ACTION_AUDIT_EVERY:-1}
 
-# Use 1 job per GPU for smoke
-NUM_GPUS=${SLURM_GPUS_ON_NODE:-2}
-MAX_PER_GPU=1
-TOTAL_SLOTS=$((NUM_GPUS * MAX_PER_GPU))
+# --- Resolve checkpoint path ---
+SEARCH_ROOT="${CHECKPOINT_ROOT:-${RUN_ROOT_DIR}}"
+CKPT_PATH=""
+if [[ -f "${SEARCH_ROOT}/config.json" ]]; then
+  CKPT_PATH="${SEARCH_ROOT}"
+else
+  if [[ -d "${SEARCH_ROOT}" ]]; then
+    CKPT_PATH=$(ls -td "${SEARCH_ROOT}"/*/ 2>/dev/null | while read -r d; do
+      if [[ -f "${d%/}/config.json" ]]; then
+        echo "${d%/}"
+        break
+      fi
+    done)
+  fi
+fi
 
-GPUS=()
-for ((i=0; i<NUM_GPUS; i++)); do GPUS+=("$i"); done
-
-# Single-checkpoint eval (no step subfolders)
-STEPS=(
-  final
-)
-
-# --- Preflight: validate checkpoint config matches DFM eval expectations ---
-FIRST_STEP="${STEPS[0]}"
-CKPT_PATH="${CHECKPOINT_ROOT}"
-if [[ ! -d "${CKPT_PATH}" || ! -f "${CKPT_PATH}/config.json" ]]; then
-  echo "ERROR: Expected a single checkpoint directory with config.json at ${CKPT_PATH}" 1>&2
+if [[ -z "${CKPT_PATH}" ]]; then
+  echo "ERROR: Could not resolve checkpoint path from CHECKPOINT_ROOT='${CHECKPOINT_ROOT:-}' or RUN_ROOT_DIR='${RUN_ROOT_DIR}'." 1>&2
   exit 1
 fi
 export CKPT_PATH
@@ -151,8 +157,6 @@ for k in [
     "dfm_weight_clip",
 ]:
     print(f"  {k}: {cfg.get(k)}")
-if not cfg.get("use_discrete_flow_matching", False):
-    print("WARNING: config.use_discrete_flow_matching is False. Eval may mismatch training.")
 PY
 
 python - <<'PY'
@@ -176,10 +180,8 @@ try:
         print("WARNING: pad_token_id or mask_token_id is None.")
     elif tok.pad_token_id >= len(tok) or tok.mask_token_id >= len(tok):
         print("WARNING: pad/mask token id out of range for len(tokenizer).")
-    # derive action range from config + tokenizer
     cfg = getattr(processor, "config", None)
 except Exception:
-    # Fallback: load config.json directly if processor init fails
     import json
     cfg = json.load(open(os.path.join(ckpt, "config.json")))
     tok = None
@@ -193,106 +195,75 @@ def _get(cfg, key, default=None):
 
 anchor = _get(cfg, "action_vocab_anchor", "pad")
 n_bins = _get(cfg, "n_action_bins", 256)
+begin_override = _get(cfg, "action_token_begin_idx", None)
 pad_id = _get(cfg, "pad_token_id", None)
 vocab_len = len(tok) if tok is not None else None
-if anchor == "pad" and pad_id is not None:
+
+if begin_override is not None:
+    action_begin = int(begin_override)
+    action_end = int(action_begin + int(n_bins))
+elif anchor == "pad" and pad_id is not None:
     action_end = int(pad_id)
+    action_begin = int(action_end - int(n_bins))
 elif anchor == "vocab_size" and vocab_len is not None:
     action_end = int(vocab_len)
+    action_begin = int(action_end - int(n_bins))
 else:
+    action_begin = None
     action_end = None
-action_begin = action_end - int(n_bins) if action_end is not None else None
-print("Action vocab range:")
+
+print("Action vocab summary:")
 print("  anchor:", anchor)
-print("  n_action_bins:", n_bins)
-print("  action_begin:", action_begin)
-print("  action_end:", action_end)
+print("  action_token_begin_idx:", begin_override)
+print("  action_range:", (action_begin, action_end))
 PY
 
-declare -a JOB_PIDS
-for ((i=0; i<TOTAL_SLOTS; i++)); do
-  JOB_PIDS[i]=0
- done
-
-start_job() {
-  local STEP=$1
-  local SLOT=$2
-  local GPU_INDEX=$(( SLOT / MAX_PER_GPU ))
-  local GPU=${GPUS[$GPU_INDEX]}
-
-  local CKPT_PATH="${CHECKPOINT_ROOT}"
-
-  local EXTRA_ARGS=()
-  if [[ -n "${FORCE_GRIPPER_VALUE}" ]]; then
-    EXTRA_ARGS+=(--force_gripper_value "${FORCE_GRIPPER_VALUE}")
-  fi
-
-  echo "[$(date +'%H:%M:%S')] START STEP=${STEP} on GPU=${GPU} (slot ${SLOT})"
-  CUDA_VISIBLE_DEVICES=$GPU \
-    python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
-      --pretrained_checkpoint "${CKPT_PATH}" \
-      --sync_model_logic ${SYNC_MODEL_LOGIC} \
-      --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
-      --legacy_eval_mode ${LEGACY_EVAL_MODE} \
-      --action_vocab_anchor ${ACTION_VOCAB_ANCHOR} \
-      --action_token_begin_idx ${ACTION_TOKEN_BEGIN_IDX} \
-      --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
-      --gripper_trace ${GRIPPER_TRACE} \
-      --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
-      "${EXTRA_ARGS[@]}" \
-      --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
-      --debug_log_every ${DEBUG_LOG_EVERY} \
-      --gripper_audit ${GRIPPER_AUDIT} \
-      --action_audit ${ACTION_AUDIT} \
-      --action_audit_every ${ACTION_AUDIT_EVERY} \
-      --task_suite_name ${TASK_SUITE} \
-      --num_trials_per_task ${NUM_TRIALS} \
-      --use_l1_regression False \
-      --use_diffusion False \
-      --use_discrete_diffusion False \
-      --use_discrete_flow_matching True \
-      --use_film False \
-      --center_crop True \
-      --num_images_in_input 2 \
-      --num_open_loop_steps ${NUM_OPEN_LOOP_STEPS} \
-      --use_proprio True \
-      --topk_filter_thres 0.0 \
-      --dfm_debug ${DFM_DEBUG} \
-      --dfm_debug_level ${DFM_DEBUG_LEVEL} \
-      --dfm_log_mask_stats True \
-      --dfm_log_mask_every 1 \
-      --dfm_fail_fast ${DFM_FAIL_FAST} \
-      --dfm_num_steps ${DFM_NUM_STEPS} \
-      --dfm_maskgit_num_steps ${DFM_MASKGIT_NUM_STEPS} \
-      --dfm_maskgit_schedule ${DFM_MASKGIT_SCHEDULE} \
-      --dfm_schedule ${DFM_SCHEDULE} \
-      --dfm_temperature ${DFM_TEMPERATURE} \
-      --dfm_early_exit ${DFM_EARLY_EXIT} \
-      --dfm_decode_mode ${DFM_DECODE_MODE} \
-      --local_log_dir "${LOG_DIR}" \
-      --use_wandb True \
-      --wandb_entity "${WANDB_ENTITY}" \
-      --wandb_project "${WANDB_PROJECT}" \
-    > "$LOG_DIR/eval_${STEP}.log" 2>&1 &
-
-  JOB_PIDS[$SLOT]=$!
-}
-
-for STEP in "${STEPS[@]}"; do
-  while :; do
-    for ((slot=0; slot<TOTAL_SLOTS; slot++)); do
-      pid=${JOB_PIDS[slot]}
-      if [[ $pid -eq 0 ]] || ! kill -0 "$pid" 2>/dev/null; then
-        start_job "$STEP" "$slot"
-        break 2
-      fi
-    done
-    sleep 2
-  done
-done
-
-for pid in "${JOB_PIDS[@]}"; do
-  [[ $pid -ne 0 ]] && wait "$pid"
- done
-
-echo "Eval smoke finished."
+# --- Launch eval (single job) ---
+CUDA_VISIBLE_DEVICES=0 \
+  python "${REPO_ROOT}/experiments/robot/libero/run_libero_eval.py" \
+    --pretrained_checkpoint "${CKPT_PATH}" \
+    --sync_model_logic ${SYNC_MODEL_LOGIC} \
+    --use_checkpoint_defaults ${USE_CHECKPOINT_DEFAULTS} \
+    --legacy_eval_mode ${LEGACY_EVAL_MODE} \
+    --action_vocab_anchor ${ACTION_VOCAB_ANCHOR} \
+    --action_token_begin_idx ${ACTION_TOKEN_BEGIN_IDX} \
+    --gripper_debug_raw ${GRIPPER_DEBUG_RAW} \
+    --gripper_trace ${GRIPPER_TRACE} \
+    --force_gripper_steps ${FORCE_GRIPPER_STEPS} \
+    --debug_log_all_metrics ${DEBUG_LOG_ALL_METRICS} \
+    --debug_log_every ${DEBUG_LOG_EVERY} \
+    --gripper_audit ${GRIPPER_AUDIT} \
+    --action_audit ${ACTION_AUDIT} \
+    --action_audit_every ${ACTION_AUDIT_EVERY} \
+    --task_suite_name ${TASK_SUITE} \
+    --num_trials_per_task ${NUM_TRIALS} \
+    --use_l1_regression False \
+    --use_diffusion False \
+    --use_discrete_diffusion False \
+    --use_discrete_flow_matching True \
+    --use_film False \
+    --center_crop True \
+    --num_images_in_input 2 \
+    --num_open_loop_steps 8 \
+    --use_proprio True \
+    --topk_filter_thres 0.0 \
+    --dfm_debug ${DFM_DEBUG} \
+    --dfm_debug_level ${DFM_DEBUG_LEVEL} \
+    --dfm_log_mask_stats ${DFM_LOG_MASK_STATS} \
+    --dfm_log_mask_every ${DFM_LOG_MASK_EVERY} \
+    --dfm_fail_fast ${DFM_FAIL_FAST} \
+    --dfm_num_steps ${DFM_NUM_STEPS} \
+    --dfm_schedule ${DFM_SCHEDULE} \
+    --dfm_time_eps ${DFM_TIME_EPS} \
+    --dfm_decode_mode ${DFM_DECODE_MODE} \
+    --dfm_adaptive_step ${DFM_ADAPTIVE_STEP} \
+    --dfm_step_min ${DFM_STEP_MIN} \
+    --dfm_step_max ${DFM_STEP_MAX} \
+    --dfm_temperature ${DFM_TEMPERATURE} \
+    --dfm_temperature_anneal ${DFM_TEMPERATURE_ANNEAL} \
+    --dfm_early_exit ${DFM_EARLY_EXIT} \
+    --local_log_dir "${LOG_DIR}" \
+    --use_wandb True \
+    --wandb_entity "${WANDB_ENTITY}" \
+    --wandb_project "${WANDB_PROJECT}" \
+  > "$LOG_DIR/eval_ctmc.log" 2>&1
