@@ -71,7 +71,7 @@ BASE_DIR="/scratch/ywn1043/VLA-DFM"
 DFM_T_MAX=0.7
 DFM_T_MAX_TAG=0p7
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-${BASE_DIR}/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax${DFM_T_MAX_TAG}}"
-CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-20k-tmax0p7--20260312_2031}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-/scratch/ywn1043/VLA-DFM/checkpoints/ddopenvla-libero-object-smoke-20k-maskfix-moremask-tmax0p7/openvla-7b+libero_object_no_noops+b4+lr-0.0005+lora-r16+dropout-0.0--smoke-2xA100-20k-tmax0p7--20260315_1558}"
 LOG_DIR="${BASE_DIR}/logs/eval_dfm_ctmc_tmax${DFM_T_MAX_TAG}/$(date +'%m%d_%H%M')"
 mkdir -p "$LOG_DIR"
 
