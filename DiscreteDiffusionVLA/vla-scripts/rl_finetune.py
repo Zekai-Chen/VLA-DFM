@@ -1,0 +1,248 @@
+"""
+rl_finetune.py
+
+Entry-point for DFM-VLA RL fine-tuning (Algorithm 1).
+
+Loads a pretrained DFM OpenVLA checkpoint (e.g. from finetune.py),
+attaches a PPO ratio network and value head, then runs the
+Discrete Flow Matching RL fine-tuning loop.
+
+Usage:
+    # From a locally saved DFM checkpoint:
+    python vla-scripts/rl_finetune.py \
+        --vla_path runs/my_dfm_run/checkpoint-50000 \
+        --dataset_name libero_spatial \
+        --data_root_dir datasets/rlds \
+        --num_iterations 100
+
+    # With wandb logging:
+    python vla-scripts/rl_finetune.py \
+        --vla_path runs/my_dfm_run/checkpoint-50000 \
+        --use_wandb True \
+        --wandb_project my-rl-project
+"""
+
+import os
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import draccus
+import torch
+from transformers import AutoConfig, AutoProcessor, AutoModelForVision2Seq
+
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.rl.trainer import DFMRLTrainer, RLFinetuneConfig
+from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+# Register custom model class
+AutoConfig.register("openvla", OpenVLAConfig)
+AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RLFinetuneEntryConfig:
+    # Pre-trained DFM checkpoint to start from
+    vla_path: str = "openvla/openvla-7b"
+    data_root_dir: Path = Path("datasets/rlds")
+    dataset_name: str = "libero_spatial"
+
+    # RL hyperparameters (forwarded to RLFinetuneConfig)
+    num_iterations: int = 100
+    rollout_steps: int = 50
+    batch_size: int = 8
+    ppo_clip_eps: float = 0.2
+    lambda_constraint: float = 1.0
+    ppo_epochs: int = 4
+    ppo_lr: float = 3e-4
+    dfm_epochs: int = 4
+    dfm_lr: float = 5e-6
+    dfm_grad_clip: float = 1.0
+
+    # DFM schedule
+    dfm_schedule: str = "cosine"
+    dfm_time_eps: float = 1e-3
+    dfm_t_min: float = 0.0
+    dfm_t_max: float = 1.0
+    dfm_t_bias_alpha: float = 1.0
+    dfm_weight_clip: float = 20.0
+
+    # Advantage estimation
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+
+    # Inference
+    maskgit_num_steps: int = 12
+    maskgit_schedule: str = "cosine"
+
+    # Checkpointing
+    run_root_dir: Path = Path("runs")
+    save_interval: int = 25
+    log_interval: int = 10
+    resume: Optional[str] = None
+
+    # Hardware
+    torch_dtype: str = "bfloat16"
+
+    # Logging
+    use_wandb: bool = False
+    wandb_project: str = "dfm-rl"
+
+
+# ---------------------------------------------------------------------------
+# Dummy environment (replace with real robot or simulation env)
+# ---------------------------------------------------------------------------
+
+class DummyLiberoEnv:
+    """
+    Placeholder environment matching the Trainer's expected API.
+
+    Replace this with the real LIBERO / DROID / ALOHA environment.
+    The environment must implement:
+        obs = reset() -> dict with keys: input_ids, attention_mask,
+                         pixel_values, labels, action_positions_mask
+        obs, reward, done, info = step(action_cont)
+    """
+
+    def __init__(self, batch_size: int = 4, seq_len: int = 512,
+                 img_size: int = 224, vocab_size: int = 32064):
+        self.B = batch_size
+        self.L = seq_len
+        self.img_size = img_size
+        self.vocab_size = vocab_size
+        self.step_count = 0
+        self.max_steps = 50
+
+        # Fixed action token range for dummy env
+        self.action_begin = vocab_size - 257
+        self.action_end = vocab_size - 1
+        self.mask_token_id = vocab_size - 1
+
+    def reset(self):
+        self.step_count = 0
+        return self._make_obs()
+
+    def step(self, action_cont):
+        self.step_count += 1
+        obs = self._make_obs()
+        reward = torch.zeros(self.B)
+        done = torch.tensor([self.step_count >= self.max_steps] * self.B)
+        if done.any():
+            reward = (torch.rand(self.B) > 0.7).float()  # 30% success
+        info = {"success": reward > 0.5}
+        return obs, reward, done, info
+
+    def _make_obs(self):
+        B, L = self.B, self.L
+        n_act = NUM_ACTIONS_CHUNK * ACTION_DIM
+
+        input_ids = torch.randint(0, self.vocab_size, (B, L))
+        attention_mask = torch.ones(B, L, dtype=torch.bool)
+        pixel_values = torch.rand(B, 3, self.img_size, self.img_size)
+
+        # Mark last n_act positions as action tokens
+        labels = input_ids.clone()
+        labels[:, :-n_act] = -100
+        # Fill action positions with plausible token ids
+        action_toks = torch.randint(self.action_begin, self.action_end, (B, n_act))
+        labels[:, -n_act:] = action_toks
+
+        action_pos_mask = torch.zeros(B, L, dtype=torch.bool)
+        action_pos_mask[:, -n_act:] = True
+
+        return dict(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            labels=labels,
+            action_positions_mask=action_pos_mask,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+@draccus.wrap()
+def main(cfg: RLFinetuneEntryConfig) -> None:
+    # ── Device ──────────────────────────────────────────────────────────────
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    logger.info("Using device: %s", device)
+
+    torch_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(
+        cfg.torch_dtype, torch.float32
+    )
+
+    # ── Load pretrained DFM model ────────────────────────────────────────────
+    logger.info("Loading DFM-VLA model from: %s", cfg.vla_path)
+    vla = AutoModelForVision2Seq.from_pretrained(
+        cfg.vla_path,
+        torch_dtype=torch_dtype,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+    )
+
+    # ── Build RL trainer config ──────────────────────────────────────────────
+    rl_cfg = RLFinetuneConfig(
+        num_iterations=cfg.num_iterations,
+        rollout_steps=cfg.rollout_steps,
+        batch_size=cfg.batch_size,
+        ppo_clip_eps=cfg.ppo_clip_eps,
+        lambda_constraint=cfg.lambda_constraint,
+        ppo_epochs=cfg.ppo_epochs,
+        ppo_lr=cfg.ppo_lr,
+        dfm_epochs=cfg.dfm_epochs,
+        dfm_lr=cfg.dfm_lr,
+        dfm_grad_clip=cfg.dfm_grad_clip,
+        dfm_schedule=cfg.dfm_schedule,
+        dfm_time_eps=cfg.dfm_time_eps,
+        dfm_t_min=cfg.dfm_t_min,
+        dfm_t_max=cfg.dfm_t_max,
+        dfm_t_bias_alpha=cfg.dfm_t_bias_alpha,
+        dfm_weight_clip=cfg.dfm_weight_clip,
+        gamma=cfg.gamma,
+        gae_lambda=cfg.gae_lambda,
+        maskgit_num_steps=cfg.maskgit_num_steps,
+        maskgit_schedule=cfg.maskgit_schedule,
+        save_interval=cfg.save_interval,
+        log_interval=cfg.log_interval,
+        save_dir=str(cfg.run_root_dir / "rl_dfm"),
+        use_wandb=cfg.use_wandb,
+        wandb_project=cfg.wandb_project,
+    )
+
+    # ── Environment ──────────────────────────────────────────────────────────
+    # Replace DummyLiberoEnv with the real simulation/robot environment.
+    def env_fn():
+        return DummyLiberoEnv(batch_size=cfg.batch_size)
+
+    # ── Trainer ─────────────────────────────────────────────────────────────
+    trainer = DFMRLTrainer(
+        vla_model=vla,
+        env_fn=env_fn,
+        cfg=rl_cfg,
+        device=device,
+    )
+
+    if cfg.resume:
+        trainer.load_checkpoint(cfg.resume)
+
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()
