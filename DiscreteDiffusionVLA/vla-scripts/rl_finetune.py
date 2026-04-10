@@ -37,6 +37,11 @@ from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.rl.trainer import DFMRLTrainer, RLFinetuneConfig
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 
+try:
+    from peft import LoraConfig, PeftModel, get_peft_model
+except ImportError:
+    LoraConfig = PeftModel = get_peft_model = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,12 @@ class RLFinetuneEntryConfig:
     vla_path: str = "openvla/openvla-7b"
     data_root_dir: Path = Path("datasets/rlds")
     dataset_name: str = "libero_spatial"
+
+    # Environment
+    use_dummy_env: bool = False      # True to use DummyLiberoEnv (for testing)
+    task_suite: str = "libero_spatial"
+    task_id: int = 0
+    env_resolution: int = 256
 
     # RL hyperparameters (forwarded to RLFinetuneConfig)
     num_iterations: int = 100
@@ -83,6 +94,12 @@ class RLFinetuneEntryConfig:
     # Inference
     maskgit_num_steps: int = 12
     maskgit_schedule: str = "cosine"
+
+    # LoRA
+    use_lora: bool = True
+    lora_rank: int = 32
+    lora_dropout: float = 0.0
+    lora_adapter_dir: Optional[str] = None  # path to lora_adapter/ for unmerged ckpt
 
     # Checkpointing
     run_root_dir: Path = Path("runs")
@@ -149,12 +166,13 @@ class DummyLiberoEnv:
         attention_mask = torch.ones(B, L, dtype=torch.bool)
         pixel_values = torch.rand(B, 3, self.img_size, self.img_size)
 
-        # Mark last n_act positions as action tokens
+        # Fill action positions with plausible token ids (must be valid action
+        # tokens in input_ids too, not just labels, so dfm_gkl_loss indexing
+        # stays in-bounds after apply_mask_flow_matching).
+        action_toks = torch.randint(self.action_begin, self.action_end, (B, n_act))
+        input_ids[:, -n_act:] = action_toks
         labels = input_ids.clone()
         labels[:, :-n_act] = -100
-        # Fill action positions with plausible token ids
-        action_toks = torch.randint(self.action_begin, self.action_end, (B, n_act))
-        labels[:, -n_act:] = action_toks
 
         action_pos_mask = torch.zeros(B, L, dtype=torch.bool)
         action_pos_mask[:, -n_act:] = True
@@ -196,6 +214,29 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         low_cpu_mem_usage=True,
     )
 
+    # ── Load LoRA adapter (unmerged checkpoint) ─────────────────────────────
+    if cfg.lora_adapter_dir is not None:
+        assert PeftModel is not None, "peft is required to load LoRA adapter. pip install peft"
+        logger.info("Loading LoRA adapter from: %s", cfg.lora_adapter_dir)
+        vla = PeftModel.from_pretrained(vla, cfg.lora_adapter_dir)
+        vla = vla.merge_and_unload()
+        logger.info("LoRA adapter merged into base model.")
+
+    # ── Apply fresh LoRA for RL fine-tuning ─────────────────────────────────
+    if cfg.use_lora:
+        assert get_peft_model is not None, "peft is required for LoRA. pip install peft"
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=min(cfg.lora_rank, 16),
+            lora_dropout=cfg.lora_dropout,
+            target_modules="all-linear",
+            init_lora_weights="gaussian",
+            # DFM needs trainable embed_tokens + lm_head for mask token.
+            modules_to_save=["embed_tokens", "lm_head"],
+        )
+        vla = get_peft_model(vla, lora_config)
+        vla.print_trainable_parameters()
+
     # ── Build RL trainer config ──────────────────────────────────────────────
     rl_cfg = RLFinetuneConfig(
         num_iterations=cfg.num_iterations,
@@ -226,9 +267,21 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
     )
 
     # ── Environment ──────────────────────────────────────────────────────────
-    # Replace DummyLiberoEnv with the real simulation/robot environment.
-    def env_fn():
-        return DummyLiberoEnv(batch_size=cfg.batch_size)
+    if cfg.use_dummy_env:
+        def env_fn():
+            return DummyLiberoEnv(batch_size=cfg.batch_size)
+    else:
+        from prismatic.rl.libero_env import LiberoRLEnv
+        processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
+        def env_fn():
+            return LiberoRLEnv(
+                task_suite=cfg.task_suite,
+                task_id=cfg.task_id,
+                processor=processor,
+                vla_config=vla.config,
+                unnorm_key=cfg.dataset_name,
+                resolution=cfg.env_resolution,
+            )
 
     # ── Trainer ─────────────────────────────────────────────────────────────
     trainer = DFMRLTrainer(

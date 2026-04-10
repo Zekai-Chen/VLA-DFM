@@ -32,17 +32,38 @@ Integration with VLA-DFM:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 from prismatic.rl.ratio_network import RatioNetwork, ppo_ratio_loss
 from prismatic.rl.rollout_buffer import RolloutBuffer, Transition
+
+try:
+    # Real package import (used at training time).
+    from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
+except Exception:  # pragma: no cover - smoke tests with mock model
+    ACTION_DIM, NUM_ACTIONS_CHUNK = 7, 8
+
+
+@contextlib.contextmanager
+def _disable_dfm(model):
+    """Temporarily turn off use_discrete_flow_matching so that forward()
+    does not apply internal DFM masking (avoids double-masking and crashes
+    when labels=None)."""
+    flag = getattr(model, "use_discrete_flow_matching", False)
+    model.use_discrete_flow_matching = False
+    try:
+        yield
+    finally:
+        model.use_discrete_flow_matching = flag
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +186,8 @@ def dfm_gkl_loss_per_sample(
     x1_safe = torch.where(am, x1, torch.full_like(x1, action_begin))
     xt_safe = torch.where(am, xt, torch.full_like(xt, action_begin))
 
-    x1_idx = x1_safe - action_begin
-    xt_idx = torch.where(xt_safe == mask_id, torch.full_like(xt_safe, K - 1), xt_safe - action_begin)
+    x1_idx = (x1_safe - action_begin).clamp(0, K - 1)
+    xt_idx = torch.where(xt_safe == mask_id, torch.full_like(xt_safe, K - 1), (xt_safe - action_begin).clamp(0, K - 2))
 
     log_p = torch.log_softmax(logits, dim=-1)
     log_p_x1 = log_p.gather(-1, x1_idx.unsqueeze(-1)).squeeze(-1)
@@ -227,7 +248,10 @@ class DFMRLTrainer:
         self.action_begin = action_begin
         self.action_end = action_end
         self.mask_token_id = int(self.vla.mask_token_id)
-        n_action_tokens = self.vla.config.get("NUM_ACTIONS_CHUNK", 56)  # fallback
+        # Action token grid: NUM_ACTIONS_CHUNK steps × ACTION_DIM dims (constants
+        # come from prismatic.vla.constants; cannot be read from config because
+        # `vla.config` is an HF PretrainedConfig, which has no `.get`).
+        n_action_tokens = NUM_ACTIONS_CHUNK * ACTION_DIM
 
         # Ratio network (β)
         self.ratio_net = RatioNetwork(
@@ -298,47 +322,38 @@ class DFMRLTrainer:
         num_episodes = 0
 
         for _ in range(self.cfg.rollout_steps):
-            # --- Run inference (MaskGIT decoding) ---
+            # --- Get hidden states from a clean forward pass ---
             input_ids = obs["input_ids"].to(self.device)
             attention_mask = obs["attention_mask"].to(self.device)
             pixel_values = obs["pixel_values"].to(self.device)
             labels = obs["labels"].to(self.device)
             action_pos_mask = obs["action_positions_mask"].to(self.device)
 
-            # Generate action tokens + get hidden states for value/ratio nets
-            vla_out = self.vla(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                labels=labels,
-                output_hidden_states=True,
-                dfm_schedule=self.cfg.dfm_schedule,
-                dfm_time_eps=self.cfg.dfm_time_eps,
-                dfm_t_min=self.cfg.dfm_t_min,
-                dfm_t_max=self.cfg.dfm_t_max,
-                dfm_loss_mode="generalized_kl",
-                dfm_weight_clip=self.cfg.dfm_weight_clip,
-                dfm_t_bias_alpha=self.cfg.dfm_t_bias_alpha,
-            )
+            # Plain forward — we only need hidden states.  Disable DFM
+            # masking so forward() does not apply internal DFM corruption
+            # (which crashes when labels=None and adds unwanted masking).
+            with _disable_dfm(self.vla):
+                vla_out = self.vla(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    output_hidden_states=True,
+                )
             hidden_states = vla_out.hidden_states[-1]  # (B, L, D)
 
             # Value estimate
             lang_mask = attention_mask.bool() & (~action_pos_mask)
             value = self.value_net(hidden_states, lang_mask)  # (B,)
 
-            # Predict actions (MaskGIT inference)
-            action_cont, action_token_ids = self.vla.predict_action(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                maskgit_num_steps=self.cfg.maskgit_num_steps,
-                maskgit_schedule=self.cfg.maskgit_schedule,
-            )
-
-            # Log-probability estimate via MC sampling of DFM time
-            log_prob = self._estimate_log_prob(
+            # --- Predict actions using MaskGIT inference ---
+            B = input_ids.shape[0]
+            action_cont, action_token_ids = self._predict_actions(
                 input_ids, attention_mask, pixel_values, labels, action_pos_mask
             )
+
+            # Log-probability is not consumed by the current PPO loss (which
+            # uses r_β directly), so store zeros to avoid extra forwards.
+            log_prob = torch.zeros(B, device=self.device)
 
             # Step environment
             next_obs, reward, done, info = self.env.step(action_cont)
@@ -370,12 +385,13 @@ class DFMRLTrainer:
 
         # Bootstrap last value
         last_obs_input = obs["input_ids"].to(self.device)
-        last_vla_out = self.vla(
-            input_ids=last_obs_input,
-            attention_mask=obs["attention_mask"].to(self.device),
-            pixel_values=obs["pixel_values"].to(self.device),
-            output_hidden_states=True,
-        )
+        with _disable_dfm(self.vla):
+            last_vla_out = self.vla(
+                input_ids=last_obs_input,
+                attention_mask=obs["attention_mask"].to(self.device),
+                pixel_values=obs["pixel_values"].to(self.device),
+                output_hidden_states=True,
+            )
         last_hs = last_vla_out.hidden_states[-1]
         last_lang_mask = obs["attention_mask"].to(self.device).bool() & (~obs["action_positions_mask"].to(self.device))
         last_value = self.value_net(last_hs, last_lang_mask)
@@ -400,7 +416,7 @@ class DFMRLTrainer:
         action_token_ids = batch["action_token_ids"].to(self.device)
         action_pos_mask = batch["action_positions_mask"].to(self.device)
 
-        with torch.no_grad():
+        with torch.no_grad(), _disable_dfm(self.vla):
             vla_out = self.vla(
                 input_ids=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
@@ -448,7 +464,7 @@ class DFMRLTrainer:
         action_token_ids = batch["action_token_ids"].to(self.device)
 
         # Get importance weights from (now updated) ratio network — detached
-        with torch.no_grad():
+        with torch.no_grad(), _disable_dfm(self.vla):
             vla_out_eval = self.vla(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -484,25 +500,30 @@ class DFMRLTrainer:
                 t_bias_alpha=self.cfg.dfm_t_bias_alpha,
             )
 
-            # Forward pass
-            vla_out = self.vla(
-                input_ids=None,
-                inputs_embeds=masked_embeddings,
-                attention_mask=attention_mask,
-                labels=masked_labels,
-                output_hidden_states=False,
-            )
+            # Forward pass with DFM DISABLED — we already applied masking
+            # externally via apply_mask_flow_matching above. Leaving DFM
+            # enabled would cause the model to mask AGAIN internally.
+            with _disable_dfm(self.vla):
+                vla_out = self.vla(
+                    input_ids=masked_input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    output_hidden_states=False,
+                )
 
             # Per-sample DFM loss (B,) then reweight by r_β
+            # xt must be the *corrupted* input ids (mask_token_id at masked
+            # positions, original token id elsewhere), NOT masked_labels
+            # (which uses IGNORE_INDEX at unmasked positions).
             shift_logits = vla_out.logits[:, :-1, :]
-            shift_labels = masked_labels[:, 1:]
+            shift_xt = masked_input_ids[:, 1:]
             shift_x1 = labels[:, 1:]
             shift_act_mask = action_pos_mask[:, 1:]
 
             per_sample_loss = dfm_gkl_loss_per_sample(
                 shift_logits=shift_logits,
                 x1=shift_x1,
-                xt=shift_labels,
+                xt=shift_xt,
                 action_mask=shift_act_mask,
                 kappa_t=kappa_t,
                 kdot_t=kdot_t,
@@ -539,7 +560,7 @@ class DFMRLTrainer:
         attention_mask = batch["attention_mask"].to(self.device)
         action_pos_mask = batch["action_positions_mask"].to(self.device)
 
-        with torch.no_grad():
+        with torch.no_grad(), _disable_dfm(self.vla):
             vla_out = self.vla(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -604,7 +625,11 @@ class DFMRLTrainer:
         torch.save(
             {
                 "iteration": iteration,
-                "vla_state": {k: v for k, v in self.vla.state_dict().items() if "lora" in k},
+                # Save trainable params only (LoRA adapters or full model).
+                "vla_state": {
+                    n: self.vla.state_dict()[n]
+                    for n, p in self.vla.named_parameters() if p.requires_grad
+                },
                 "ratio_net_state": self.ratio_net.state_dict(),
                 "value_net_state": self.value_net.state_dict(),
                 "vla_optimizer": self.vla_optimizer.state_dict(),
@@ -630,57 +655,90 @@ class DFMRLTrainer:
     # Helpers
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
-    def _estimate_log_prob(
-        self,
-        input_ids,
-        attention_mask,
-        pixel_values,
-        labels,
-        action_pos_mask,
-        n_mc: int = 4,
+    @staticmethod
+    def _extract_action_token_ids(
+        labels: torch.Tensor,
+        action_pos_mask: torch.Tensor,
+        n_act: int,
     ) -> torch.Tensor:
+        """Extract the first `n_act` action token ids per sample from labels."""
+        B = labels.shape[0]
+        device = labels.device
+        out = torch.zeros(B, n_act, device=device, dtype=labels.dtype)
+        for i in range(B):
+            idx = action_pos_mask[i].nonzero(as_tuple=False).squeeze(-1)
+            k = min(len(idx), n_act)
+            if k > 0:
+                out[i, :k] = labels[i, idx[:k]]
+        return out
+
+    @torch.no_grad()
+    def _predict_actions(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pixel_values: torch.Tensor,
+        labels: torch.Tensor,
+        action_pos_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Monte-Carlo estimate of log π_θ(a|s) via:
-            E_{t~U[0,1], x_t~q_t(·|a)} [log p^θ_{1|t}(a|x_t, s)]
+        Predict actions and recover discrete token ids.
+
+        If the VLA has a real ``predict_action`` with DFM support, call it
+        (batch_size=1 loop) and reverse-map the continuous actions back to
+        token ids.  Otherwise (mock model or models without predict_action),
+        fall back to extracting token ids from labels.
+
+        Returns:
+            action_cont:      (B, NUM_ACTIONS_CHUNK, ACTION_DIM) continuous.
+            action_token_ids: (B, N_act) discrete token ids.
         """
         B = input_ids.shape[0]
-        log_prob_accum = torch.zeros(B, device=self.device)
+        n_act = NUM_ACTIONS_CHUNK * ACTION_DIM
+        has_predict = hasattr(self.vla, "predict_action") and hasattr(self.vla, "bin_centers")
 
-        for _ in range(n_mc):
-            embeddings = self.vla.get_input_embeddings()(input_ids)
-            _, masked_emb, masked_labels, _, kappa_t, kdot_t, _ = self.vla.apply_mask_flow_matching(
-                input_ids=input_ids,
-                input_embeddings=embeddings,
-                labels=labels,
-                loss_mask_full=action_pos_mask,
-                mask_token_id=self.mask_token_id,
-                schedule=self.cfg.dfm_schedule,
-                time_eps=self.cfg.dfm_time_eps,
-            )
-            vla_out = self.vla(
-                inputs_embeds=masked_emb,
-                attention_mask=attention_mask,
-                labels=masked_labels,
-                output_hidden_states=False,
-            )
-            shift_logits = vla_out.logits[:, :-1, :]
-            shift_labels = masked_labels[:, 1:]
-            shift_x1 = labels[:, 1:]
-            shift_act_mask = action_pos_mask[:, 1:]
+        if has_predict:
+            all_actions = []
+            for i in range(B):
+                single_ids = input_ids[i : i + 1]
+                single_mask = attention_mask[i : i + 1]
+                single_pv = pixel_values[i : i + 1]
+                actions_np, _ = self.vla.predict_action(
+                    input_ids=single_ids,
+                    attention_mask=single_mask,
+                    pixel_values=single_pv,
+                    use_discrete_flow_matching=True,
+                    dfm_maskgit_num_steps=self.cfg.maskgit_num_steps,
+                    dfm_maskgit_schedule=self.cfg.maskgit_schedule,
+                    dfm_schedule=self.cfg.dfm_schedule,
+                    dfm_time_eps=self.cfg.dfm_time_eps,
+                )
+                all_actions.append(actions_np)
 
-            per_sample = dfm_gkl_loss_per_sample(
-                shift_logits=shift_logits,
-                x1=shift_x1,
-                xt=shift_labels,
-                action_mask=shift_act_mask,
-                kappa_t=kappa_t,
-                kdot_t=kdot_t,
-                action_begin=self.action_begin,
-                action_end=self.action_end,
-                mask_id=self.mask_token_id,
-                weight_clip=self.cfg.dfm_weight_clip,
-            )
-            log_prob_accum -= per_sample  # loss = -log_prob
+            # Stack and convert back to token ids
+            actions_np = np.stack(all_actions, axis=0)  # (B, CHUNK, DIM)
+            # Reverse the token→action mapping:
+            #   token → disc = action_end - token → clip(disc-1) → bin_centers[disc]
+            # Inverse: bin_idx = argmin(|centers - val|), token = end - bin_idx - 1
+            bin_centers = self.vla.bin_centers  # (n_bins,) numpy
+            flat = actions_np.reshape(B, -1)  # (B, n_act)
+            # Vectorised nearest-bin lookup
+            diffs = np.abs(bin_centers[None, None, :] - flat[:, :, None])  # (B, n_act, n_bins)
+            bin_idx = diffs.argmin(axis=-1)  # (B, n_act)
+            token_ids_np = self.action_end - bin_idx - 1
 
-        return log_prob_accum / n_mc
+            action_cont = torch.as_tensor(
+                actions_np, dtype=torch.float32, device=self.device
+            )
+            action_token_ids = torch.as_tensor(
+                token_ids_np, dtype=torch.long, device=self.device
+            )
+        else:
+            # Fallback: extract from labels (for mock models / smoke tests).
+            action_token_ids = self._extract_action_token_ids(labels, action_pos_mask, n_act)
+            n_bins = self.action_end - self.action_begin
+            bin_centers_t = torch.linspace(-1.0, 1.0, n_bins, device=self.device)
+            rel = (action_token_ids - self.action_begin).clamp(0, n_bins - 1)
+            action_cont = bin_centers_t[rel].view(B, NUM_ACTIONS_CHUNK, ACTION_DIM)
+
+        return action_cont, action_token_ids
