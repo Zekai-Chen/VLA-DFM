@@ -128,7 +128,14 @@ class LiberoRLEnv:
         suite = benchmark_dict[task_suite]()
         task = suite.get_task(task_id)
         self.task_label = task.language
-        self.init_states = suite.get_task_init_states(task_id)
+        # Monkey-patch torch.load for LIBERO init states (PyTorch 2.6+
+        # defaults to weights_only=True which rejects numpy arrays).
+        _orig_load = torch.load
+        torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+        try:
+            self.init_states = suite.get_task_init_states(task_id)
+        finally:
+            torch.load = _orig_load
         self.init_state_idx = init_state_idx
 
         # Build env
