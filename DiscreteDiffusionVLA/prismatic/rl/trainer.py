@@ -297,6 +297,7 @@ class DFMRLTrainer:
         )
 
         self.global_step = 0
+        self._model_dtype = next(self.vla.parameters()).dtype
 
         if self.cfg.use_wandb:
             import wandb
@@ -325,7 +326,7 @@ class DFMRLTrainer:
             # --- Get hidden states from a clean forward pass ---
             input_ids = obs["input_ids"].to(self.device)
             attention_mask = obs["attention_mask"].to(self.device)
-            pixel_values = obs["pixel_values"].to(self.device)
+            pixel_values = obs["pixel_values"].to(device=self.device, dtype=self._model_dtype)
             labels = obs["labels"].to(self.device)
             action_pos_mask = obs["action_positions_mask"].to(self.device)
 
@@ -390,7 +391,7 @@ class DFMRLTrainer:
             last_vla_out = self.vla(
                 input_ids=last_obs_input,
                 attention_mask=obs["attention_mask"].to(self.device),
-                pixel_values=obs["pixel_values"].to(self.device),
+                pixel_values=obs["pixel_values"].to(device=self.device, dtype=self._model_dtype),
                 labels=obs["labels"].to(self.device),
                 output_hidden_states=True,
             )
@@ -422,7 +423,7 @@ class DFMRLTrainer:
             vla_out = self.vla(
                 input_ids=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
-                pixel_values=batch["pixel_values"].to(self.device),
+                pixel_values=batch["pixel_values"].to(device=self.device, dtype=self._model_dtype),
                 labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
@@ -461,7 +462,7 @@ class DFMRLTrainer:
 
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
-        pixel_values = batch["pixel_values"].to(self.device)
+        pixel_values = batch["pixel_values"].to(device=self.device, dtype=self._model_dtype)
         labels = batch["labels"].to(self.device)
         action_pos_mask = batch["action_positions_mask"].to(self.device)
         action_token_ids = batch["action_token_ids"].to(self.device)
@@ -569,7 +570,7 @@ class DFMRLTrainer:
             vla_out = self.vla(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                pixel_values=batch["pixel_values"].to(self.device),
+                pixel_values=batch["pixel_values"].to(device=self.device, dtype=self._model_dtype),
                 labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
