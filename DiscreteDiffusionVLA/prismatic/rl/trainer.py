@@ -240,6 +240,7 @@ class DFMRLTrainer:
 
         # Pre-trained DFM-VLA (θ)
         self.vla = vla_model.to(self.device)
+        self._model_dtype = next(self.vla.parameters()).dtype
         model_cfg = vla_model.config
 
         # Infer LLM hidden dim and action vocab from model config
@@ -262,13 +263,13 @@ class DFMRLTrainer:
             hidden_dim=self.cfg.ratio_hidden_dim,
             num_heads=self.cfg.ratio_num_heads,
             num_layers=self.cfg.ratio_num_layers,
-        ).to(self.device)
+        ).to(device=self.device, dtype=self._model_dtype)
 
         # Value network
         self.value_net = ValueNetwork(
             llm_hidden_dim=llm_hidden_dim,
             hidden_dim=512,
-        ).to(self.device)
+        ).to(device=self.device, dtype=self._model_dtype)
 
         # Environment
         self.env_fn = env_fn
@@ -298,7 +299,6 @@ class DFMRLTrainer:
         )
 
         self.global_step = 0
-        self._model_dtype = next(self.vla.parameters()).dtype
 
         if self.cfg.use_wandb:
             import wandb
