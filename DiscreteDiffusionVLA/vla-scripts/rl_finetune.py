@@ -214,6 +214,15 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         low_cpu_mem_usage=True,
     )
 
+    # ── Inject fine-tuning dataset statistics into norm_stats ────────────────
+    dataset_stats_path = os.path.join(cfg.vla_path, "dataset_statistics.json")
+    if os.path.exists(dataset_stats_path):
+        import json
+        with open(dataset_stats_path) as f:
+            ft_stats = json.load(f)
+        vla.norm_stats.update(ft_stats)
+        logger.info("Injected dataset statistics: %s", list(ft_stats.keys()))
+
     # ── Load LoRA adapter (unmerged checkpoint) ─────────────────────────────
     if cfg.lora_adapter_dir is not None:
         assert PeftModel is not None, "peft is required to load LoRA adapter. pip install peft"
