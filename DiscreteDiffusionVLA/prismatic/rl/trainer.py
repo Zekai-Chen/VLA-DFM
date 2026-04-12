@@ -146,9 +146,10 @@ class ValueNetwork(nn.Module):
         Returns:
             value: (B,)
         """
-        # Mean-pool over language tokens
-        denom = lang_mask.float().sum(dim=1).clamp(min=1.0).unsqueeze(-1)  # (B, 1)
-        state = (hidden_states * lang_mask.unsqueeze(-1).float()).sum(dim=1) / denom  # (B, D)
+        # Mean-pool over language tokens (keep dtype of hidden_states)
+        dt = hidden_states.dtype
+        denom = lang_mask.to(dt).sum(dim=1).clamp(min=1.0).unsqueeze(-1)  # (B, 1)
+        state = (hidden_states * lang_mask.unsqueeze(-1).to(dt)).sum(dim=1) / denom  # (B, D)
         return self.net(state).squeeze(-1)  # (B,)
 
 
