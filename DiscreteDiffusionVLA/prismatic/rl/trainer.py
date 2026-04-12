@@ -337,6 +337,7 @@ class DFMRLTrainer:
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     pixel_values=pixel_values,
+                    labels=labels,
                     output_hidden_states=True,
                 )
             hidden_states = vla_out.hidden_states[-1]  # (B, L, D)
@@ -390,6 +391,7 @@ class DFMRLTrainer:
                 input_ids=last_obs_input,
                 attention_mask=obs["attention_mask"].to(self.device),
                 pixel_values=obs["pixel_values"].to(self.device),
+                labels=obs["labels"].to(self.device),
                 output_hidden_states=True,
             )
         last_hs = last_vla_out.hidden_states[-1]
@@ -421,6 +423,7 @@ class DFMRLTrainer:
                 input_ids=batch["input_ids"].to(self.device),
                 attention_mask=batch["attention_mask"].to(self.device),
                 pixel_values=batch["pixel_values"].to(self.device),
+                labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
             hidden_states = vla_out.hidden_states[-1].detach()
@@ -469,6 +472,7 @@ class DFMRLTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 pixel_values=pixel_values,
+                labels=labels,
                 output_hidden_states=True,
             )
             hs = vla_out_eval.hidden_states[-1]
@@ -508,6 +512,7 @@ class DFMRLTrainer:
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
                     pixel_values=pixel_values,
+                    labels=masked_labels,
                     output_hidden_states=False,
                 )
 
@@ -565,6 +570,7 @@ class DFMRLTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 pixel_values=batch["pixel_values"].to(self.device),
+                labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
             hs = vla_out.hidden_states[-1]
