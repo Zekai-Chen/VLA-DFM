@@ -108,6 +108,7 @@ class RLFinetuneConfig:
     # ── Inference ─────────────────────────────────────────────────────────
     maskgit_num_steps: int = 12
     maskgit_schedule: str = "cosine"
+    unnorm_key: Optional[str] = None   # dataset key for action un-normalisation
 
     # ── Logging / checkpointing ────────────────────────────────────────────
     log_interval: int = 10
@@ -735,6 +736,7 @@ class DFMRLTrainer:
                 single_pv = pixel_values[i : i + 1]
                 actions_np, _ = self.vla.predict_action(
                     input_ids=single_ids,
+                    unnorm_key=self.cfg.unnorm_key,
                     attention_mask=single_mask,
                     pixel_values=single_pv,
                     use_discrete_flow_matching=True,

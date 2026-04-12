@@ -259,6 +259,7 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         gae_lambda=cfg.gae_lambda,
         maskgit_num_steps=cfg.maskgit_num_steps,
         maskgit_schedule=cfg.maskgit_schedule,
+        unnorm_key=cfg.dataset_name,
         save_interval=cfg.save_interval,
         log_interval=cfg.log_interval,
         save_dir=str(cfg.run_root_dir / "rl_dfm"),
