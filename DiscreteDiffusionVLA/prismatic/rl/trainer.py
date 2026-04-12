@@ -341,7 +341,9 @@ class DFMRLTrainer:
                     labels=labels,
                     output_hidden_states=True,
                 )
-            hidden_states = vla_out.hidden_states[-1]  # (B, L, D)
+            hidden_states = self._strip_patches(
+                vla_out.hidden_states[-1], input_ids.shape[1]
+            )  # (B, L_text, D)
 
             # Value estimate
             lang_mask = attention_mask.bool() & (~action_pos_mask)
@@ -395,7 +397,9 @@ class DFMRLTrainer:
                 labels=obs["labels"].to(self.device),
                 output_hidden_states=True,
             )
-        last_hs = last_vla_out.hidden_states[-1]
+        last_hs = self._strip_patches(
+            last_vla_out.hidden_states[-1], last_obs_input.shape[1]
+        )
         last_lang_mask = obs["attention_mask"].to(self.device).bool() & (~obs["action_positions_mask"].to(self.device))
         last_value = self.value_net(last_hs, last_lang_mask)
 
@@ -427,7 +431,9 @@ class DFMRLTrainer:
                 labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
-            hidden_states = vla_out.hidden_states[-1].detach()
+            hidden_states = self._strip_patches(
+                vla_out.hidden_states[-1], batch["input_ids"].shape[1]
+            ).detach()
 
         # Relative action token ids: map [action_begin, action_end) -> [0, n_bins)
         rel_action_ids = (action_token_ids - self.action_begin).clamp(0, self.ratio_net.action_vocab)
@@ -476,7 +482,7 @@ class DFMRLTrainer:
                 labels=labels,
                 output_hidden_states=True,
             )
-            hs = vla_out_eval.hidden_states[-1]
+            hs = self._strip_patches(vla_out_eval.hidden_states[-1], input_ids.shape[1])
             rel_ids = (action_token_ids - self.action_begin).clamp(0, self.ratio_net.action_vocab)
             weights = self.ratio_net(hs, rel_ids, action_pos_mask).detach()  # (B,)
 
@@ -521,7 +527,9 @@ class DFMRLTrainer:
             # xt must be the *corrupted* input ids (mask_token_id at masked
             # positions, original token id elsewhere), NOT masked_labels
             # (which uses IGNORE_INDEX at unmasked positions).
-            shift_logits = vla_out.logits[:, :-1, :]
+            # Strip vision patch positions from logits to align with text masks.
+            logits_text = self._strip_patches(vla_out.logits, masked_input_ids.shape[1])
+            shift_logits = logits_text[:, :-1, :]
             shift_xt = masked_input_ids[:, 1:]
             shift_x1 = labels[:, 1:]
             shift_act_mask = action_pos_mask[:, 1:]
@@ -574,7 +582,7 @@ class DFMRLTrainer:
                 labels=batch["labels"].to(self.device),
                 output_hidden_states=True,
             )
-            hs = vla_out.hidden_states[-1]
+            hs = self._strip_patches(vla_out.hidden_states[-1], input_ids.shape[1])
 
         lang_mask = attention_mask.bool() & (~action_pos_mask)
         values = self.value_net(hs, lang_mask)
@@ -646,6 +654,21 @@ class DFMRLTrainer:
             path,
         )
         logger.info("Saved checkpoint: %s", path)
+
+    @staticmethod
+    def _strip_patches(hidden_states: torch.Tensor, seq_len: int) -> torch.Tensor:
+        """Extract text-only hidden states from multimodal output.
+
+        The multimodal forward prepends vision patches after the BOS token:
+            [BOS, patch_1..patch_N, text_token_2..text_token_L]
+        This helper removes the patch positions so the output aligns with
+        the original input_ids / masks of length ``seq_len``.
+        """
+        L_mm = hidden_states.shape[1]
+        if L_mm == seq_len:
+            return hidden_states  # no patches (mock model)
+        n_patches = L_mm - seq_len
+        return torch.cat([hidden_states[:, :1, :], hidden_states[:, n_patches + 1:, :]], dim=1)
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=self.device)
