@@ -57,13 +57,32 @@ except Exception:  # pragma: no cover - smoke tests with mock model
 def _disable_dfm(model):
     """Temporarily turn off use_discrete_flow_matching so that forward()
     does not apply internal DFM masking (avoids double-masking and crashes
-    when labels=None)."""
-    flag = getattr(model, "use_discrete_flow_matching", False)
-    model.use_discrete_flow_matching = False
+    when labels=None).
+
+    Handles PEFT-wrapped models by reaching through to the base model."""
+    # Unwrap PEFT / DDP layers to find the actual model with the flag
+    base = model
+    for attr in ("base_model", "model", "module"):
+        if hasattr(base, attr):
+            inner = getattr(base, attr)
+            if hasattr(inner, "use_discrete_flow_matching"):
+                base = inner
+                break
+    # Also check one more level (PeftModel.base_model.model)
+    if not hasattr(base, "use_discrete_flow_matching"):
+        for attr in ("base_model", "model"):
+            if hasattr(base, attr):
+                inner = getattr(base, attr)
+                if hasattr(inner, "use_discrete_flow_matching"):
+                    base = inner
+                    break
+
+    flag = getattr(base, "use_discrete_flow_matching", False)
+    base.use_discrete_flow_matching = False
     try:
         yield
     finally:
-        model.use_discrete_flow_matching = flag
+        base.use_discrete_flow_matching = flag
 
 logger = logging.getLogger(__name__)
 
