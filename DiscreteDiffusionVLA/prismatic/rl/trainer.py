@@ -59,30 +59,36 @@ def _disable_dfm(model):
     does not apply internal DFM masking (avoids double-masking and crashes
     when labels=None).
 
-    Handles PEFT-wrapped models by reaching through to the base model."""
-    # Unwrap PEFT / DDP layers to find the actual model with the flag
-    base = model
-    for attr in ("base_model", "model", "module"):
-        if hasattr(base, attr):
-            inner = getattr(base, attr)
-            if hasattr(inner, "use_discrete_flow_matching"):
-                base = inner
-                break
-    # Also check one more level (PeftModel.base_model.model)
-    if not hasattr(base, "use_discrete_flow_matching"):
-        for attr in ("base_model", "model"):
-            if hasattr(base, attr):
-                inner = getattr(base, attr)
-                if hasattr(inner, "use_discrete_flow_matching"):
-                    base = inner
-                    break
+    Handles PEFT-wrapped models by setting the flag on ALL layers that
+    have it (PeftModel, LoraModel, and the underlying OpenVLA model)."""
+    # Collect all objects in the wrapper chain that have the flag
+    targets = []
+    for path in [
+        [],                          # model itself
+        ["base_model"],              # LoraModel
+        ["model"],                   # OpenVLA (via PeftModel.model)
+        ["base_model", "model"],     # OpenVLA (via PeftModel.base_model.model)
+        ["module"],                  # DDP wrapper
+        ["module", "base_model", "model"],
+    ]:
+        obj = model
+        try:
+            for attr in path:
+                obj = getattr(obj, attr)
+            if hasattr(obj, "use_discrete_flow_matching"):
+                targets.append(obj)
+        except AttributeError:
+            pass
 
-    flag = getattr(base, "use_discrete_flow_matching", False)
-    base.use_discrete_flow_matching = False
+    # Save and disable
+    saved = [(t, t.use_discrete_flow_matching) for t in targets]
+    for t in targets:
+        t.use_discrete_flow_matching = False
     try:
         yield
     finally:
-        base.use_discrete_flow_matching = flag
+        for t, flag in saved:
+            t.use_discrete_flow_matching = flag
 
 logger = logging.getLogger(__name__)
 
