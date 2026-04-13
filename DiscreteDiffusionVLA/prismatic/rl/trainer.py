@@ -265,6 +265,7 @@ class DFMRLTrainer:
         env_fn: Callable,
         cfg: RLFinetuneConfig | None = None,
         device: str | torch.device = "cuda",
+        proprio_projector=None,
     ):
         self.cfg = cfg or RLFinetuneConfig()
         self.device = torch.device(device) if isinstance(device, str) else device
@@ -272,6 +273,9 @@ class DFMRLTrainer:
         # Pre-trained DFM-VLA (θ)
         self.vla = vla_model.to(self.device)
         self._model_dtype = next(self.vla.parameters()).dtype
+        self.proprio_projector = proprio_projector
+        if proprio_projector is not None:
+            self.proprio_projector = self.proprio_projector.to(self.device)
         model_cfg = vla_model.config
 
         # Infer LLM hidden dim and action vocab from model config
@@ -369,6 +373,9 @@ class DFMRLTrainer:
                 pixel_values = obs["pixel_values"].to(device=self.device, dtype=self._model_dtype)
                 labels = obs["labels"].to(self.device)
                 action_pos_mask = obs["action_positions_mask"].to(self.device)
+                proprio = obs.get("proprio")
+                if proprio is not None:
+                    proprio = proprio.to(device=self.device, dtype=self._model_dtype)
 
                 with _disable_dfm(self.vla):
                     vla_out = self.vla(
@@ -376,6 +383,8 @@ class DFMRLTrainer:
                         attention_mask=attention_mask,
                         pixel_values=pixel_values,
                         labels=labels,
+                        proprio=proprio,
+                        proprio_projector=self.proprio_projector,
                         output_hidden_states=True,
                     )
                 hidden_states = self._strip_patches(
@@ -386,7 +395,8 @@ class DFMRLTrainer:
 
                 B = input_ids.shape[0]
                 action_cont, action_token_ids = self._predict_actions(
-                    input_ids, attention_mask, pixel_values, labels, action_pos_mask
+                    input_ids, attention_mask, pixel_values, labels, action_pos_mask,
+                    proprio=proprio,
                 )
                 log_prob = torch.zeros(B, device=self.device)
 
@@ -424,12 +434,17 @@ class DFMRLTrainer:
 
         # Bootstrap last value
         last_obs_input = obs["input_ids"].to(self.device)
+        last_proprio = obs.get("proprio")
+        if last_proprio is not None:
+            last_proprio = last_proprio.to(device=self.device, dtype=self._model_dtype)
         with _disable_dfm(self.vla):
             last_vla_out = self.vla(
                 input_ids=last_obs_input,
                 attention_mask=obs["attention_mask"].to(self.device),
                 pixel_values=obs["pixel_values"].to(device=self.device, dtype=self._model_dtype),
                 labels=obs["labels"].to(self.device),
+                proprio=last_proprio,
+                proprio_projector=self.proprio_projector,
                 output_hidden_states=True,
             )
         last_hs = self._strip_patches(
@@ -757,6 +772,7 @@ class DFMRLTrainer:
         pixel_values: torch.Tensor,
         labels: torch.Tensor,
         action_pos_mask: torch.Tensor,
+        proprio: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict actions and recover discrete token ids.
@@ -780,11 +796,14 @@ class DFMRLTrainer:
                 single_ids = input_ids[i : i + 1]
                 single_mask = attention_mask[i : i + 1]
                 single_pv = pixel_values[i : i + 1]
+                single_pr = proprio[i : i + 1] if proprio is not None else None
                 actions_np, _ = self.vla.predict_action(
                     input_ids=single_ids,
                     unnorm_key=self.cfg.unnorm_key,
                     attention_mask=single_mask,
                     pixel_values=single_pv,
+                    proprio=single_pr,
+                    proprio_projector=self.proprio_projector,
                     use_discrete_flow_matching=True,
                     dfm_maskgit_num_steps=self.cfg.maskgit_num_steps,
                     dfm_maskgit_schedule=self.cfg.maskgit_schedule,

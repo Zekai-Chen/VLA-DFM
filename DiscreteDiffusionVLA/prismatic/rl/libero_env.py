@@ -217,30 +217,40 @@ class LiberoRLEnv:
     # ------------------------------------------------------------------
 
     def _make_obs(self, raw_obs: dict) -> Dict[str, torch.Tensor]:
-        """Build trainer-compatible observation dict from LIBERO raw obs."""
-        img = _prepare_image(raw_obs["agentview_image"])
+        """Build trainer-compatible observation dict from LIBERO raw obs.
+
+        Produces the same obs layout as the eval script:
+          - 2 images: agentview + wrist (both rotated 180 deg)
+          - Proprioception: eef_pos(3) + axis-angle(3) + gripper(1) = 7D
+          - Prompt matches legacy format: "In: What action should..."
+        """
         from PIL import Image
-        pil_img = Image.fromarray(img)
+        agent_img = _prepare_image(raw_obs["agentview_image"])
+        wrist_img = _prepare_image(raw_obs["robot0_eye_in_hand_image"])
+        agent_pil = Image.fromarray(agent_img)
+        wrist_pil = Image.fromarray(wrist_img)
 
         # Build prompt (matches training format).
         prompt = f"In: What action should the robot take to {self.task_label.lower()}?\nOut:"
 
-        # Tokenise with processor (returns input_ids, attention_mask, pixel_values)
-        if self._cached_prompt_inputs is None:
-            inputs = self.processor(prompt, pil_img)
-            self._cached_prompt_inputs = {
-                "prompt_input_ids": inputs["input_ids"],         # (1, L_prompt)
-                "prompt_attention_mask": inputs["attention_mask"],
-            }
-            # Store pixel_values shape for consistency checks
-            self._pv_shape = inputs["pixel_values"].shape
+        # Process primary image to get tokenised prompt
+        primary = self.processor(prompt, agent_pil)
+        # Process wrist image
+        wrist = self.processor(prompt, wrist_pil)
 
-        # Re-process image (pixel values change per frame)
-        inputs = self.processor(prompt, pil_img)
+        input_ids = primary["input_ids"]       # (1, L_prompt)
+        attention_mask = primary["attention_mask"]
+        # Concatenate both images along image dim (matches eval: num_images_in_input=2)
+        primary_pv = primary["pixel_values"]   # (1, 1, C, H, W)
+        wrist_pv = wrist["pixel_values"]       # (1, 1, C, H, W)
+        pixel_values = torch.cat([primary_pv, wrist_pv], dim=1)  # (1, 2, C, H, W)
 
-        input_ids = inputs["input_ids"]       # (1, L_prompt)
-        attention_mask = inputs["attention_mask"]
-        pixel_values = inputs["pixel_values"]  # (1, n_img, C, H, W) or (1, C, H, W)
+        # Proprio: eef_pos(3) + axis_angle(3) + gripper(1) = 7D
+        proprio = np.concatenate([
+            raw_obs["robot0_eef_pos"],
+            _quat2axisangle(raw_obs["robot0_eef_quat"]),
+            raw_obs["robot0_gripper_qpos"],
+        ]).astype(np.float32)  # (7,)
 
         # Strip EOS if present at end (to match training)
         if input_ids[0, -1] == self.processor.tokenizer.eos_token_id:
@@ -275,4 +285,5 @@ class LiberoRLEnv:
             "pixel_values": pixel_values,
             "labels": labels,
             "action_positions_mask": action_pos_mask,
+            "proprio": torch.from_numpy(proprio).unsqueeze(0),  # (1, 7)
         }

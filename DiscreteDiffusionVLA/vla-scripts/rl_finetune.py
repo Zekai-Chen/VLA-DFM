@@ -236,6 +236,28 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         vla = vla.merge_and_unload()
         logger.info("LoRA adapter merged into base model.")
 
+    # ── Load proprio projector if available ──────────────────────────────────
+    proprio_projector = None
+    proprio_ckpt = None
+    import glob as _glob
+    for pattern in ["proprio_projector*.pt", "**/proprio_projector*.pt"]:
+        matches = _glob.glob(os.path.join(cfg.vla_path, pattern), recursive=True)
+        if matches:
+            proprio_ckpt = matches[0]
+            break
+    if proprio_ckpt is not None:
+        from prismatic.models.projectors import ProprioProjector
+        from prismatic.vla.constants import PROPRIO_DIM
+        llm_dim = vla.config.text_config.hidden_size
+        proprio_projector = ProprioProjector(llm_dim=llm_dim, proprio_dim=PROPRIO_DIM)
+        proprio_projector = proprio_projector.to(device=device, dtype=torch_dtype)
+        state = torch.load(proprio_ckpt, map_location=device, weights_only=False)
+        # Handle potential "module." prefix from DDP training
+        state = {k.replace("module.", ""): v for k, v in state.items()}
+        proprio_projector.load_state_dict(state)
+        proprio_projector.eval()
+        logger.info("Loaded proprio_projector from: %s", proprio_ckpt)
+
     # ── Apply fresh LoRA for RL fine-tuning ─────────────────────────────────
     if cfg.use_lora:
         assert get_peft_model is not None, "peft is required for LoRA. pip install peft"
@@ -307,6 +329,7 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         env_fn=env_fn,
         cfg=rl_cfg,
         device=device,
+        proprio_projector=proprio_projector,
     )
 
     if cfg.resume:
