@@ -95,6 +95,9 @@ class RLFinetuneEntryConfig:
     maskgit_num_steps: int = 12
     maskgit_schedule: str = "cosine"
 
+    # Memory
+    update_mini_batch: int = 4
+
     # LoRA
     use_lora: bool = True
     lora_rank: int = 32
@@ -269,6 +272,7 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         maskgit_num_steps=cfg.maskgit_num_steps,
         maskgit_schedule=cfg.maskgit_schedule,
         unnorm_key=cfg.dataset_name,
+        update_mini_batch=cfg.update_mini_batch,
         save_interval=cfg.save_interval,
         log_interval=cfg.log_interval,
         save_dir=str(cfg.run_root_dir / "rl_dfm"),
