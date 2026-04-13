@@ -219,6 +219,12 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         low_cpu_mem_usage=True,
     )
 
+    # ── Set vision backbone to multi-image mode ──────────────────────────────
+    # Matches training/eval convention: num_images_in_input=2 (agentview + wrist)
+    if hasattr(vla, "vision_backbone"):
+        vla.vision_backbone.set_num_images_in_input(2)
+        logger.info("Set vision_backbone num_images_in_input=2")
+
     # ── Inject fine-tuning dataset statistics into norm_stats ────────────────
     dataset_stats_path = os.path.join(cfg.vla_path, "dataset_statistics.json")
     if os.path.exists(dataset_stats_path):
