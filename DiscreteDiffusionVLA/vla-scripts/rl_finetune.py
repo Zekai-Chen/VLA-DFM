@@ -70,6 +70,8 @@ class RLFinetuneEntryConfig:
     # RL hyperparameters (forwarded to RLFinetuneConfig)
     num_iterations: int = 100
     rollout_steps: int = 50
+    rollout_episodes: int = 5
+    max_transitions: int = 200
     batch_size: int = 8
     ppo_clip_eps: float = 0.2
     lambda_constraint: float = 1.0
@@ -253,6 +255,8 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
     rl_cfg = RLFinetuneConfig(
         num_iterations=cfg.num_iterations,
         rollout_steps=cfg.rollout_steps,
+        rollout_episodes=cfg.rollout_episodes,
+        max_transitions=cfg.max_transitions,
         batch_size=cfg.batch_size,
         ppo_clip_eps=cfg.ppo_clip_eps,
         lambda_constraint=cfg.lambda_constraint,

@@ -101,7 +101,9 @@ logger = logging.getLogger(__name__)
 class RLFinetuneConfig:
     # ── RL outer loop ──────────────────────────────────────────────────────
     num_iterations: int = 100         # K
-    rollout_steps: int = 50           # env steps collected per iteration
+    rollout_steps: int = 50           # legacy: max env steps per iteration
+    rollout_episodes: int = 5         # full episodes per iteration (new)
+    max_transitions: int = 200        # cap total transitions per iteration
     batch_size: int = 8               # samples per gradient update
 
     # ── PPO / ratio network ────────────────────────────────────────────────
@@ -322,7 +324,7 @@ class DFMRLTrainer:
 
         # Rollout buffer
         self.buffer = RolloutBuffer(
-            capacity=self.cfg.rollout_steps * 4,
+            capacity=max(self.cfg.max_transitions, self.cfg.rollout_steps * 4),
             gamma=self.cfg.gamma,
             gae_lambda=self.cfg.gae_lambda,
         )
@@ -347,75 +349,78 @@ class DFMRLTrainer:
         self.value_net.eval()
         self.buffer.clear()
 
-        obs = self.env.reset()
         total_reward = 0.0
         success_count = 0
         num_episodes = 0
+        num_transitions = 0
+        max_trans = int(self.cfg.max_transitions)
 
-        for _ in range(self.cfg.rollout_steps):
-            # --- Get hidden states from a clean forward pass ---
-            input_ids = obs["input_ids"].to(self.device)
-            attention_mask = obs["attention_mask"].to(self.device)
-            pixel_values = obs["pixel_values"].to(device=self.device, dtype=self._model_dtype)
-            labels = obs["labels"].to(self.device)
-            action_pos_mask = obs["action_positions_mask"].to(self.device)
+        # Run FULL episodes (each ends when env returns done=True) until we
+        # either hit rollout_episodes or max_transitions.
+        for _ep in range(int(self.cfg.rollout_episodes)):
+            if num_transitions >= max_trans:
+                break
+            obs = self.env.reset()
+            ep_reward = 0.0
+            ep_success = 0.0
+            while num_transitions < max_trans:
+                input_ids = obs["input_ids"].to(self.device)
+                attention_mask = obs["attention_mask"].to(self.device)
+                pixel_values = obs["pixel_values"].to(device=self.device, dtype=self._model_dtype)
+                labels = obs["labels"].to(self.device)
+                action_pos_mask = obs["action_positions_mask"].to(self.device)
 
-            # Plain forward — we only need hidden states.  Disable DFM
-            # masking so forward() does not apply internal DFM corruption
-            # (which crashes when labels=None and adds unwanted masking).
-            with _disable_dfm(self.vla):
-                vla_out = self.vla(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    labels=labels,
-                    output_hidden_states=True,
+                with _disable_dfm(self.vla):
+                    vla_out = self.vla(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                        labels=labels,
+                        output_hidden_states=True,
+                    )
+                hidden_states = self._strip_patches(
+                    vla_out.hidden_states[-1], input_ids.shape[1]
                 )
-            hidden_states = self._strip_patches(
-                vla_out.hidden_states[-1], input_ids.shape[1]
-            )  # (B, L_text, D)
+                lang_mask = attention_mask.bool() & (~action_pos_mask)
+                value = self.value_net(hidden_states, lang_mask)
 
-            # Value estimate
-            lang_mask = attention_mask.bool() & (~action_pos_mask)
-            value = self.value_net(hidden_states, lang_mask)  # (B,)
+                B = input_ids.shape[0]
+                action_cont, action_token_ids = self._predict_actions(
+                    input_ids, attention_mask, pixel_values, labels, action_pos_mask
+                )
+                log_prob = torch.zeros(B, device=self.device)
 
-            # --- Predict actions using MaskGIT inference ---
-            B = input_ids.shape[0]
-            action_cont, action_token_ids = self._predict_actions(
-                input_ids, attention_mask, pixel_values, labels, action_pos_mask
-            )
+                next_obs, reward, done, info = self.env.step(action_cont)
 
-            # Log-probability is not consumed by the current PPO loss (which
-            # uses r_β directly), so store zeros to avoid extra forwards.
-            log_prob = torch.zeros(B, device=self.device)
+                trans = Transition(
+                    input_ids=input_ids.cpu(),
+                    attention_mask=attention_mask.cpu(),
+                    pixel_values=pixel_values.cpu(),
+                    labels=labels.cpu(),
+                    action_positions_mask=action_pos_mask.cpu(),
+                    action_token_ids=action_token_ids.cpu(),
+                    action_cont=action_cont.cpu(),
+                    reward=reward,
+                    done=done,
+                    value=value.detach().cpu(),
+                    log_prob=log_prob.detach().cpu(),
+                )
+                self.buffer.push(trans)
+                num_transitions += 1
+                ep_reward += reward.mean().item()
+                if "success" in info:
+                    ep_success = info["success"].float().mean().item()
 
-            # Step environment
-            next_obs, reward, done, info = self.env.step(action_cont)
+                del vla_out, hidden_states
+                torch.cuda.empty_cache()
 
-            # Store
-            trans = Transition(
-                input_ids=input_ids.cpu(),
-                attention_mask=attention_mask.cpu(),
-                pixel_values=pixel_values.cpu(),
-                labels=labels.cpu(),
-                action_positions_mask=action_pos_mask.cpu(),
-                action_token_ids=action_token_ids.cpu(),
-                action_cont=action_cont.cpu(),
-                reward=reward,
-                done=done,
-                value=value.detach().cpu(),
-                log_prob=log_prob.detach().cpu(),
-            )
-            self.buffer.push(trans)
+                obs = next_obs
+                if done.all():
+                    break
 
-            total_reward += reward.mean().item()
-            if "success" in info:
-                success_count += info["success"].float().mean().item()
-                num_episodes += 1
-
-            obs = next_obs
-            if done.all():
-                obs = self.env.reset()
+            total_reward += ep_reward
+            success_count += ep_success
+            num_episodes += 1
 
         # Bootstrap last value
         last_obs_input = obs["input_ids"].to(self.device)
@@ -437,8 +442,10 @@ class DFMRLTrainer:
         self.buffer.compute_advantages(last_value=last_value.detach().cpu())
 
         return {
-            "rollout/mean_reward": total_reward / self.cfg.rollout_steps,
+            "rollout/mean_reward": total_reward / max(num_episodes, 1),
             "rollout/success_rate": success_count / max(num_episodes, 1),
+            "rollout/num_transitions": float(num_transitions),
+            "rollout/num_episodes": float(num_episodes),
         }
 
     # ------------------------------------------------------------------
