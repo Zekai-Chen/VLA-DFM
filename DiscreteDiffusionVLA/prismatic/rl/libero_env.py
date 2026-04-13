@@ -117,6 +117,7 @@ class LiberoRLEnv:
         unnorm_key: str = "libero_spatial",
         resolution: int = 256,
         init_state_idx: int = 0,
+        proprio_norm_stats: Optional[dict] = None,
     ):
         benchmark_mod, get_libero_path, OffScreenRenderEnv = _try_import_libero()
 
@@ -171,6 +172,7 @@ class LiberoRLEnv:
 
         self.step_count = 0
         self._cached_prompt_inputs: Optional[Dict[str, torch.Tensor]] = None
+        self.proprio_norm_stats = proprio_norm_stats
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,6 +253,18 @@ class LiberoRLEnv:
             _quat2axisangle(raw_obs["robot0_eef_quat"]),
             raw_obs["robot0_gripper_qpos"],
         ]).astype(np.float32)  # (7,)
+        # Normalise using dataset statistics (matches eval pipeline).
+        if self.proprio_norm_stats is not None:
+            s = self.proprio_norm_stats
+            if "q99" in s and "q01" in s:
+                hi, lo = np.array(s["q99"]), np.array(s["q01"])
+            else:
+                hi, lo = np.array(s["max"]), np.array(s["min"])
+            mask = np.asarray(s.get("mask", np.ones_like(lo, dtype=bool)))
+            proprio = np.clip(
+                np.where(mask, 2 * (proprio - lo) / (hi - lo + 1e-8) - 1, proprio),
+                -1.0, 1.0,
+            ).astype(np.float32)
 
         # Strip EOS if present at end (to match training)
         if input_ids[0, -1] == self.processor.tokenizer.eos_token_id:

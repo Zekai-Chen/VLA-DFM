@@ -319,12 +319,18 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
     else:
         from prismatic.rl.libero_env import LiberoRLEnv
         processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
+        proprio_stats = None
+        if hasattr(vla, "norm_stats") and cfg.dataset_name in vla.norm_stats:
+            proprio_stats = vla.norm_stats[cfg.dataset_name].get("proprio")
+            if proprio_stats is not None:
+                logger.info("Using proprio norm stats from dataset %s", cfg.dataset_name)
         def env_fn():
             return LiberoRLEnv(
                 task_suite=cfg.task_suite,
                 task_id=cfg.task_id,
                 processor=processor,
                 vla_config=vla.config,
+                proprio_norm_stats=proprio_stats,
                 unnorm_key=cfg.dataset_name,
                 resolution=cfg.env_resolution,
             )
