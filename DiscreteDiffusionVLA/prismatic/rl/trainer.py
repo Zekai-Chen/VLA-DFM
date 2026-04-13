@@ -135,6 +135,9 @@ class RLFinetuneConfig:
     maskgit_schedule: str = "cosine"
     unnorm_key: Optional[str] = None   # dataset key for action un-normalisation
 
+    # ── Memory: chunk size for VLA forward over rollout batch ──────────────
+    update_mini_batch: int = 4         # process N samples at a time in updates
+
     # ── Logging / checkpointing ────────────────────────────────────────────
     log_interval: int = 10
     save_interval: int = 25
@@ -442,6 +445,33 @@ class DFMRLTrainer:
     # Step 2: PPO update for ratio network β
     # ------------------------------------------------------------------
 
+    @torch.no_grad()
+    def _collect_hidden_states(self, batch: dict) -> torch.Tensor:
+        """Run VLA forward in mini-batches to avoid OOM on long rollouts.
+
+        Returns concatenated, patch-stripped hidden states (B_total, L_text, D).
+        """
+        B = batch["input_ids"].shape[0]
+        mb = max(1, int(self.cfg.update_mini_batch))
+        chunks = []
+        with _disable_dfm(self.vla):
+            for i in range(0, B, mb):
+                j = min(i + mb, B)
+                out = self.vla(
+                    input_ids=batch["input_ids"][i:j].to(self.device),
+                    attention_mask=batch["attention_mask"][i:j].to(self.device),
+                    pixel_values=batch["pixel_values"][i:j].to(device=self.device, dtype=self._model_dtype),
+                    labels=batch["labels"][i:j].to(self.device),
+                    output_hidden_states=True,
+                )
+                h = self._strip_patches(
+                    out.hidden_states[-1], batch["input_ids"].shape[1]
+                ).detach()
+                chunks.append(h)
+                del out
+                torch.cuda.empty_cache()
+        return torch.cat(chunks, dim=0)
+
     def update_ratio_network(self, batch: dict) -> Dict[str, float]:
         """Algorithm 1, step 5-6."""
         self.ratio_net.train()
@@ -450,17 +480,8 @@ class DFMRLTrainer:
         action_token_ids = batch["action_token_ids"].to(self.device)
         action_pos_mask = batch["action_positions_mask"].to(self.device)
 
-        with torch.no_grad(), _disable_dfm(self.vla):
-            vla_out = self.vla(
-                input_ids=batch["input_ids"].to(self.device),
-                attention_mask=batch["attention_mask"].to(self.device),
-                pixel_values=batch["pixel_values"].to(device=self.device, dtype=self._model_dtype),
-                labels=batch["labels"].to(self.device),
-                output_hidden_states=True,
-            )
-            hidden_states = self._strip_patches(
-                vla_out.hidden_states[-1], batch["input_ids"].shape[1]
-            ).detach()
+        # Mini-batched VLA forward to get hidden states (no grad)
+        hidden_states = self._collect_hidden_states(batch)
 
         # Relative action token ids: map [action_begin, action_end) -> [0, n_bins)
         rel_action_ids = (action_token_ids - self.action_begin).clamp(0, self.ratio_net.action_vocab)
@@ -493,100 +514,100 @@ class DFMRLTrainer:
         """Algorithm 1, steps 7-10."""
         self.vla.train()
 
-        input_ids = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        pixel_values = batch["pixel_values"].to(device=self.device, dtype=self._model_dtype)
-        labels = batch["labels"].to(self.device)
-        action_pos_mask = batch["action_positions_mask"].to(self.device)
+        B = batch["input_ids"].shape[0]
+        mb = max(1, int(self.cfg.update_mini_batch))
         action_token_ids = batch["action_token_ids"].to(self.device)
+        action_pos_mask = batch["action_positions_mask"].to(self.device)
 
-        # Get importance weights from (now updated) ratio network — detached
-        with torch.no_grad(), _disable_dfm(self.vla):
-            vla_out_eval = self.vla(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                labels=labels,
-                output_hidden_states=True,
-            )
-            hs = self._strip_patches(vla_out_eval.hidden_states[-1], input_ids.shape[1])
+        # Get importance weights r_β via mini-batched no-grad forward
+        hidden_states_noGrad = self._collect_hidden_states(batch)
+        with torch.no_grad():
             rel_ids = (action_token_ids - self.action_begin).clamp(0, self.ratio_net.action_vocab)
-            weights = self.ratio_net(hs, rel_ids, action_pos_mask).detach()  # (B,)
+            weights = self.ratio_net(hidden_states_noGrad, rel_ids, action_pos_mask).detach()  # (B,)
+        del hidden_states_noGrad
+        torch.cuda.empty_cache()
 
         total_loss = 0.0
+        total_samples = 0
         for _ in range(self.cfg.dfm_epochs):
-            # Sample t ~ U[0,1] and x_t ~ q_t(·|a) via apply_mask_flow_matching
-            embeddings = self.vla.get_input_embeddings()(input_ids)
-            (
-                masked_input_ids,
-                masked_embeddings,
-                masked_labels,
-                loss_mask,
-                kappa_t,
-                kdot_t,
-                t,
-            ) = self.vla.apply_mask_flow_matching(
-                input_ids=input_ids,
-                input_embeddings=embeddings,
-                labels=labels,
-                loss_mask_full=action_pos_mask,
-                mask_token_id=self.mask_token_id,
-                schedule=self.cfg.dfm_schedule,
-                time_eps=self.cfg.dfm_time_eps,
-                t_min=self.cfg.dfm_t_min,
-                t_max=self.cfg.dfm_t_max,
-                t_bias_alpha=self.cfg.dfm_t_bias_alpha,
-            )
+            # Process in mini-batches: accumulate gradients via backward()
+            self.vla_optimizer.zero_grad()
+            for i in range(0, B, mb):
+                j = min(i + mb, B)
+                iids = batch["input_ids"][i:j].to(self.device)
+                amask = batch["attention_mask"][i:j].to(self.device)
+                pix = batch["pixel_values"][i:j].to(device=self.device, dtype=self._model_dtype)
+                lbl = batch["labels"][i:j].to(self.device)
+                apmask = action_pos_mask[i:j]
+                w = weights[i:j]
 
-            # Forward pass with DFM DISABLED — we already applied masking
-            # externally via apply_mask_flow_matching above. Leaving DFM
-            # enabled would cause the model to mask AGAIN internally.
-            with _disable_dfm(self.vla):
-                vla_out = self.vla(
-                    input_ids=masked_input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=pixel_values,
-                    labels=masked_labels,
-                    output_hidden_states=False,
+                embeddings = self.vla.get_input_embeddings()(iids)
+                (
+                    masked_input_ids,
+                    _masked_emb,
+                    masked_labels,
+                    _lmask,
+                    kappa_t,
+                    kdot_t,
+                    _t,
+                ) = self.vla.apply_mask_flow_matching(
+                    input_ids=iids,
+                    input_embeddings=embeddings,
+                    labels=lbl,
+                    loss_mask_full=apmask,
+                    mask_token_id=self.mask_token_id,
+                    schedule=self.cfg.dfm_schedule,
+                    time_eps=self.cfg.dfm_time_eps,
+                    t_min=self.cfg.dfm_t_min,
+                    t_max=self.cfg.dfm_t_max,
+                    t_bias_alpha=self.cfg.dfm_t_bias_alpha,
                 )
 
-            # Per-sample DFM loss (B,) then reweight by r_β
-            # xt must be the *corrupted* input ids (mask_token_id at masked
-            # positions, original token id elsewhere), NOT masked_labels
-            # (which uses IGNORE_INDEX at unmasked positions).
-            # Strip vision patch positions from logits to align with text masks.
-            logits_text = self._strip_patches(vla_out.logits, masked_input_ids.shape[1])
-            shift_logits = logits_text[:, :-1, :]
-            shift_xt = masked_input_ids[:, 1:]
-            shift_x1 = labels[:, 1:]
-            shift_act_mask = action_pos_mask[:, 1:]
+                with _disable_dfm(self.vla):
+                    vla_out = self.vla(
+                        input_ids=masked_input_ids,
+                        attention_mask=amask,
+                        pixel_values=pix,
+                        labels=masked_labels,
+                        output_hidden_states=False,
+                    )
 
-            per_sample_loss = dfm_gkl_loss_per_sample(
-                shift_logits=shift_logits,
-                x1=shift_x1,
-                xt=shift_xt,
-                action_mask=shift_act_mask,
-                kappa_t=kappa_t,
-                kdot_t=kdot_t,
-                action_begin=self.action_begin,
-                action_end=self.action_end,
-                mask_id=self.mask_token_id,
-                weight_clip=self.cfg.dfm_weight_clip,
-            )  # (B,)
+                logits_text = self._strip_patches(vla_out.logits, masked_input_ids.shape[1])
+                shift_logits = logits_text[:, :-1, :]
+                shift_xt = masked_input_ids[:, 1:]
+                shift_x1 = lbl[:, 1:]
+                shift_act_mask = apmask[:, 1:]
 
-            loss = (weights * per_sample_loss).mean()
+                per_sample = dfm_gkl_loss_per_sample(
+                    shift_logits=shift_logits,
+                    x1=shift_x1,
+                    xt=shift_xt,
+                    action_mask=shift_act_mask,
+                    kappa_t=kappa_t,
+                    kdot_t=kdot_t,
+                    action_begin=self.action_begin,
+                    action_end=self.action_end,
+                    mask_id=self.mask_token_id,
+                    weight_clip=self.cfg.dfm_weight_clip,
+                )  # (mb,)
 
-            self.vla_optimizer.zero_grad()
-            loss.backward()
+                # Scale by 1/B so that sum of mini-batch grads = full batch grad
+                loss = (w * per_sample).sum() / B
+                loss.backward()
+                total_loss += loss.item() * B  # restore scale for reporting
+                total_samples += (j - i)
+
+                del vla_out, logits_text, shift_logits, embeddings
+                torch.cuda.empty_cache()
+
             nn.utils.clip_grad_norm_(
                 filter(lambda p: p.requires_grad, self.vla.parameters()),
                 self.cfg.dfm_grad_clip,
             )
             self.vla_optimizer.step()
-            total_loss += loss.item()
 
         return {
-            "policy/weighted_dfm_loss": total_loss / self.cfg.dfm_epochs,
+            "policy/weighted_dfm_loss": total_loss / max(total_samples, 1),
             "policy/mean_weight": weights.mean().item(),
         }
 
@@ -597,19 +618,11 @@ class DFMRLTrainer:
     def update_value_network(self, batch: dict) -> Dict[str, float]:
         self.value_net.train()
         returns = batch["returns"].to(self.device)
-        input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
         action_pos_mask = batch["action_positions_mask"].to(self.device)
 
-        with torch.no_grad(), _disable_dfm(self.vla):
-            vla_out = self.vla(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=batch["pixel_values"].to(device=self.device, dtype=self._model_dtype),
-                labels=batch["labels"].to(self.device),
-                output_hidden_states=True,
-            )
-            hs = self._strip_patches(vla_out.hidden_states[-1], input_ids.shape[1])
+        # Mini-batched VLA forward to get hidden states (no grad)
+        hs = self._collect_hidden_states(batch)
 
         lang_mask = attention_mask.bool() & (~action_pos_mask)
         values = self.value_net(hs, lang_mask)
