@@ -189,7 +189,7 @@ class LiberoRLEnv:
         """
         Parameters
         ----------
-        action_cont : (1, CHUNK, DIM) tensor of continuous actions in [-1, 1].
+        action_cont : (1, CHUNK, DIM) tensor of un-normalised actions.
 
         Returns
         -------
@@ -197,9 +197,12 @@ class LiberoRLEnv:
         """
         self.step_count += 1
         # Take first chunk step
-        act = action_cont[0, 0].detach().cpu().numpy()  # (DIM,)
-        # Post-process: binarise gripper, invert sign (OpenVLA convention)
-        act[-1] = 1.0 if act[-1] >= 0 else -1.0
+        act = action_cont[0, 0].detach().cpu().numpy().copy()  # (DIM,)
+        # Match eval's post-processing exactly:
+        # 1) normalize gripper from [0,1] -> [-1,+1] with binarisation
+        # 2) invert gripper sign (OpenVLA convention: -1=open, +1=close in env)
+        act[-1] = 2 * act[-1] - 1
+        act[-1] = float(np.sign(act[-1]))
         act[-1] *= -1.0
 
         raw_obs, reward_scalar, done_scalar, info = self.env.step(act.tolist())
