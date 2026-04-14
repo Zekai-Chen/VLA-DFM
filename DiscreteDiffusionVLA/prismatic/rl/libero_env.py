@@ -360,6 +360,21 @@ class LiberoRLEnv:
         L_prompt = input_ids.shape[1]
         n_act = NUM_ACTIONS_CHUNK * ACTION_DIM
 
+        # Pad prompt to a fixed length (so different tasks produce equal-sized
+        # tensors that can be stacked in the rollout buffer).
+        PAD_LEN = 48  # max prompt length across libero tasks is ~30-35 tokens
+        pad_id = int(getattr(self.vla_config, "pad_token_id", 32000))
+        if L_prompt < PAD_LEN:
+            pad = torch.full((1, PAD_LEN - L_prompt), pad_id, dtype=input_ids.dtype)
+            input_ids = torch.cat([pad, input_ids], dim=1)  # left-pad
+            mask_pad = torch.zeros(1, PAD_LEN - L_prompt, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([mask_pad, attention_mask], dim=1)
+        elif L_prompt > PAD_LEN:
+            # Truncate from left (keep the tail of the prompt)
+            input_ids = input_ids[:, -PAD_LEN:]
+            attention_mask = attention_mask[:, -PAD_LEN:]
+        L_prompt = PAD_LEN
+
         # Append placeholder action tokens (will be filled with mask tokens)
         mask_tokens = torch.full((1, n_act), self.mask_token_id, dtype=input_ids.dtype)
         input_ids = torch.cat([input_ids, mask_tokens], dim=1)
@@ -369,10 +384,8 @@ class LiberoRLEnv:
         attention_mask = torch.cat([attention_mask, mask_ext], dim=1)
 
         # Labels: IGNORE_INDEX everywhere, action positions get mask_token_id
-        # (actual GT ids are unknown in RL — env doesn't have them).
         L = input_ids.shape[1]
         labels = torch.full((1, L), IGNORE_INDEX, dtype=input_ids.dtype)
-        # Put mask_token_id at action positions as placeholder labels
         labels[:, L_prompt:] = self.mask_token_id
 
         # Action positions mask
