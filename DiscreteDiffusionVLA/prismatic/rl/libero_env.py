@@ -182,7 +182,11 @@ class LiberoRLEnv:
         self.step_count = 0
         self.env.reset()
         raw_obs = self.env.set_init_state(self.init_states[self.init_state_idx])
-        self._cached_prompt_inputs = None  # recompute
+        # Wait 10 dummy steps for objects to stabilise (matches eval).
+        dummy = [0, 0, 0, 0, 0, 0, -1]
+        for _ in range(10):
+            raw_obs, _, _, _ = self.env.step(dummy)
+        self._cached_prompt_inputs = None
         return self._make_obs(raw_obs)
 
     def step(self, action_cont: torch.Tensor):
