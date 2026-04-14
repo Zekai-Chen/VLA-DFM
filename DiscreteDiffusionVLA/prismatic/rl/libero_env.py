@@ -150,38 +150,27 @@ class LiberoRLEnv:
         resolution: int = 256,
         init_state_idx: int = 0,
         proprio_norm_stats: Optional[dict] = None,
+        rotate_tasks: bool = False,
+        num_tasks: int = 10,
     ):
         benchmark_mod, get_libero_path, OffScreenRenderEnv = _try_import_libero()
 
         self.task_suite_name = task_suite
         self.max_steps = _TASK_MAX_STEPS.get(task_suite, 300)
+        self._benchmark_mod = benchmark_mod
+        self._get_libero_path = get_libero_path
+        self._OffScreenRenderEnv = OffScreenRenderEnv
+        self._resolution = resolution
+        self.rotate_tasks = rotate_tasks
+        self.num_tasks = num_tasks
 
         # Load benchmark task
         benchmark_dict = benchmark_mod.get_benchmark_dict()
-        suite = benchmark_dict[task_suite]()
-        task = suite.get_task(task_id)
-        self.task_label = task.language
-        # Monkey-patch torch.load for LIBERO init states (PyTorch 2.6+
-        # defaults to weights_only=True which rejects numpy arrays).
-        _orig_load = torch.load
-        torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
-        try:
-            self.init_states = suite.get_task_init_states(task_id)
-        finally:
-            torch.load = _orig_load
+        self._suite = benchmark_dict[task_suite]()
+        self._episode_counter = 0
+        self.task_id = task_id
         self.init_state_idx = init_state_idx
-
-        # Build env
-        task_bddl_file = os.path.join(
-            get_libero_path("bddl_files"),
-            task.problem_folder,
-            task.bddl_file,
-        )
-        self.env = OffScreenRenderEnv(
-            bddl_file_name=task_bddl_file,
-            camera_heights=resolution,
-            camera_widths=resolution,
-        )
+        self._load_task(task_id)
         self.env.seed(0)
 
         # Processor and config
@@ -206,14 +195,54 @@ class LiberoRLEnv:
         self._cached_prompt_inputs: Optional[Dict[str, torch.Tensor]] = None
         self.proprio_norm_stats = proprio_norm_stats
 
+    def _load_task(self, task_id: int) -> None:
+        """(Re)create the underlying LIBERO env for the given task."""
+        task = self._suite.get_task(task_id)
+        self.task_id = task_id
+        self.task_label = task.language
+        _orig_load = torch.load
+        torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+        try:
+            self.init_states = self._suite.get_task_init_states(task_id)
+        finally:
+            torch.load = _orig_load
+        bddl = os.path.join(
+            self._get_libero_path("bddl_files"),
+            task.problem_folder,
+            task.bddl_file,
+        )
+        # Close existing env if present
+        if hasattr(self, "env") and self.env is not None:
+            try:
+                self.env.close()
+            except Exception:
+                pass
+        self.env = self._OffScreenRenderEnv(
+            bddl_file_name=bddl,
+            camera_heights=self._resolution,
+            camera_widths=self._resolution,
+        )
+        self.env.seed(0)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def reset(self) -> Dict[str, torch.Tensor]:
         self.step_count = 0
+        # Rotate task_id / init_state_idx per episode if enabled
+        if self.rotate_tasks:
+            new_task = self._episode_counter % self.num_tasks
+            new_init = (self._episode_counter // self.num_tasks) % len(self.init_states)
+            if new_task != self.task_id:
+                self._load_task(new_task)
+            self.init_state_idx = new_init
+        self._episode_counter += 1
+
         self.env.reset()
-        raw_obs = self.env.set_init_state(self.init_states[self.init_state_idx])
+        # Clamp init_state_idx to available states (varies per task)
+        idx = min(self.init_state_idx, len(self.init_states) - 1)
+        raw_obs = self.env.set_init_state(self.init_states[idx])
         # Wait 10 dummy steps for objects to stabilise (matches eval).
         dummy = [0, 0, 0, 0, 0, 0, -1]
         for _ in range(10):

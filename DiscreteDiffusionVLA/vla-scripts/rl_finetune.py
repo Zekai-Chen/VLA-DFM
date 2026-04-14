@@ -66,6 +66,8 @@ class RLFinetuneEntryConfig:
     task_suite: str = "libero_spatial"
     task_id: int = 0
     env_resolution: int = 256
+    rotate_tasks: bool = False       # rotate through tasks 0..num_tasks per episode
+    num_tasks: int = 10
 
     # RL hyperparameters (forwarded to RLFinetuneConfig)
     num_iterations: int = 100
@@ -331,6 +333,8 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
                 processor=processor,
                 vla_config=vla.config,
                 proprio_norm_stats=proprio_stats,
+                rotate_tasks=cfg.rotate_tasks,
+                num_tasks=cfg.num_tasks,
                 unnorm_key=cfg.dataset_name,
                 resolution=cfg.env_resolution,
             )
