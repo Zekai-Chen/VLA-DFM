@@ -99,6 +99,24 @@ def _resize_image_for_policy(img: np.ndarray, size: int = 224) -> np.ndarray:
     return x.numpy()
 
 
+def _center_crop_image(pil_img):
+    """Match eval's center crop (crop_scale=0.9, then resize back)."""
+    import tensorflow as tf
+    from PIL import Image
+    x = tf.convert_to_tensor(np.array(pil_img))
+    x = tf.image.convert_image_dtype(x, tf.float32)
+    # crop_scale=0.9
+    h = tf.shape(x)[0]
+    w = tf.shape(x)[1]
+    new_h = tf.cast(tf.cast(h, tf.float32) * tf.sqrt(0.9), tf.int32)
+    new_w = tf.cast(tf.cast(w, tf.float32) * tf.sqrt(0.9), tf.int32)
+    x = tf.image.resize_with_crop_or_pad(x, new_h, new_w)
+    x = tf.image.resize(x[None, ...], (h, w), method="lanczos3", antialias=True)[0]
+    x = tf.clip_by_value(x, 0, 1)
+    x = tf.image.convert_image_dtype(x, tf.uint8, saturate=True)
+    return Image.fromarray(x.numpy()).convert("RGB")
+
+
 class LiberoRLEnv:
     """
     RL-compatible wrapper around a single LIBERO task.
@@ -265,11 +283,11 @@ class LiberoRLEnv:
         from PIL import Image
         agent_img = _prepare_image(raw_obs["agentview_image"])
         wrist_img = _prepare_image(raw_obs["robot0_eye_in_hand_image"])
-        # Match training pipeline: JPEG + lanczos3 resize to 224x224
+        # Match training pipeline exactly: JPEG + lanczos3 resize + center crop
         agent_img = _resize_image_for_policy(agent_img, 224)
         wrist_img = _resize_image_for_policy(wrist_img, 224)
-        agent_pil = Image.fromarray(agent_img)
-        wrist_pil = Image.fromarray(wrist_img)
+        agent_pil = _center_crop_image(Image.fromarray(agent_img))
+        wrist_pil = _center_crop_image(Image.fromarray(wrist_img))
 
         # Build prompt (matches training format).
         prompt = f"In: What action should the robot take to {self.task_label.lower()}?\nOut:"
