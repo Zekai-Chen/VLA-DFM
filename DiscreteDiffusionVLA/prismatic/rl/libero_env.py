@@ -85,6 +85,20 @@ def _prepare_image(img: np.ndarray) -> np.ndarray:
     return img[::-1, ::-1].copy()
 
 
+def _resize_image_for_policy(img: np.ndarray, size: int = 224) -> np.ndarray:
+    """Match the training data pipeline exactly: JPEG encode/decode +
+    lanczos3 resize + round-and-clip."""
+    try:
+        import tensorflow as tf
+    except ImportError as e:
+        raise ImportError("tensorflow required for training-aligned image resize") from e
+    x = tf.image.encode_jpeg(img)
+    x = tf.io.decode_image(x, expand_animations=False, dtype=tf.uint8)
+    x = tf.image.resize(x, (size, size), method="lanczos3", antialias=True)
+    x = tf.cast(tf.clip_by_value(tf.round(x), 0, 255), tf.uint8)
+    return x.numpy()
+
+
 class LiberoRLEnv:
     """
     RL-compatible wrapper around a single LIBERO task.
@@ -251,6 +265,9 @@ class LiberoRLEnv:
         from PIL import Image
         agent_img = _prepare_image(raw_obs["agentview_image"])
         wrist_img = _prepare_image(raw_obs["robot0_eye_in_hand_image"])
+        # Match training pipeline: JPEG + lanczos3 resize to 224x224
+        agent_img = _resize_image_for_policy(agent_img, 224)
+        wrist_img = _resize_image_for_policy(wrist_img, 224)
         agent_pil = Image.fromarray(agent_img)
         wrist_pil = Image.fromarray(wrist_img)
 
