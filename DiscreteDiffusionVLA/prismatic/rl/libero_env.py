@@ -187,25 +187,40 @@ class LiberoRLEnv:
 
     def step(self, action_cont: torch.Tensor):
         """
+        Execute ALL NUM_ACTIONS_CHUNK (8) actions from the predicted chunk
+        (matches eval's action_queue behaviour).  Accumulates env steps,
+        terminates early if the task completes.
+
         Parameters
         ----------
         action_cont : (1, CHUNK, DIM) tensor of un-normalised actions.
 
         Returns
         -------
-        obs, reward (1,), done (1,), info dict.
+        obs (at end of chunk), reward (1,), done (1,), info dict.
         """
-        self.step_count += 1
-        # Take first chunk step
-        act = action_cont[0, 0].detach().cpu().numpy().copy()  # (DIM,)
-        # Match eval's post-processing exactly:
-        # 1) normalize gripper from [0,1] -> [-1,+1] with binarisation
-        # 2) invert gripper sign (OpenVLA convention: -1=open, +1=close in env)
-        act[-1] = 2 * act[-1] - 1
-        act[-1] = float(np.sign(act[-1]))
-        act[-1] *= -1.0
+        chunk = action_cont[0].detach().cpu().numpy().copy()  # (CHUNK, DIM)
+        total_reward = 0.0
+        final_done = False
+        final_info = {}
+        raw_obs = None
+        for step_i in range(chunk.shape[0]):
+            self.step_count += 1
+            act = chunk[step_i].copy()
+            # Match eval's gripper postprocess:
+            act[-1] = 2 * act[-1] - 1
+            act[-1] = float(np.sign(act[-1]))
+            act[-1] *= -1.0
+            raw_obs, r, d, info = self.env.step(act.tolist())
+            total_reward += float(r)
+            final_info = info
+            if d or self.step_count >= self.max_steps:
+                final_done = True
+                break
 
-        raw_obs, reward_scalar, done_scalar, info = self.env.step(act.tolist())
+        reward_scalar = total_reward
+        done_scalar = final_done
+        info = final_info
 
         # Also done if max steps reached
         if self.step_count >= self.max_steps:
