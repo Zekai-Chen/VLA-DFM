@@ -84,9 +84,9 @@ def main(cfg: Cfg):
 
     # ---- EVAL pipeline ----
     print("\n=== EVAL pipeline (prepare_observation + get_vla_action) ===")
-    sys.path.insert(0, "/home/ubuntu/VLA-DFM/DiscreteDiffusionVLA/experiments/robot")
-    from robot.libero.run_libero_eval import prepare_observation
-    from robot.openvla_utils import normalize_proprio, prepare_images_for_vla
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from experiments.robot.libero.run_libero_eval import prepare_observation
+    from experiments.robot.openvla_utils import normalize_proprio, prepare_images_for_vla
     from types import SimpleNamespace
 
     eval_obs, _ = prepare_observation(raw_obs, resize_size=(224, 224))
