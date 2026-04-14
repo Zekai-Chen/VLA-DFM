@@ -41,7 +41,7 @@ AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
 @dataclass
 class ValidateConfig:
-    vla_path: str
+    vla_path: str = ""
     dataset_name: str = "libero_object_no_noops"
     task_suite: str = "libero_object"
     num_tasks: int = 10
