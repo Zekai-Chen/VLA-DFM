@@ -128,10 +128,18 @@ def main(cfg: ValidateConfig) -> None:
                 if pr is not None:
                     pr = pr.to(device=device, dtype=dtype)
 
+                # predict_action adds its own action placeholders, so we
+                # must pass ONLY the prompt portion of input_ids (without the
+                # mask tokens that our env appends for RL forward calls).
+                from prismatic.vla.constants import NUM_ACTIONS_CHUNK, ACTION_DIM
+                n_act = NUM_ACTIONS_CHUNK * ACTION_DIM
+                prompt_ids = obs["input_ids"][:, :-n_act]  # strip trailing mask tokens
+                prompt_mask = obs["attention_mask"][:, :-n_act]
+
                 with torch.inference_mode():
                     actions_np, _ = vla.predict_action(
-                        input_ids=obs["input_ids"].to(device),
-                        attention_mask=obs["attention_mask"].to(device),
+                        input_ids=prompt_ids.to(device),
+                        attention_mask=prompt_mask.to(device),
                         pixel_values=pv,
                         proprio=pr,
                         proprio_projector=proprio_projector,
