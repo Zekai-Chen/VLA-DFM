@@ -792,9 +792,14 @@ class DFMRLTrainer:
 
         if has_predict:
             all_actions = []
+            # predict_action appends its own action placeholders internally.
+            # Our env's input_ids already includes mask-token placeholders for
+            # RL forward calls, so we must strip them before predict_action.
+            prompt_ids = input_ids[:, :-n_act]
+            prompt_mask = attention_mask[:, :-n_act]
             for i in range(B):
-                single_ids = input_ids[i : i + 1]
-                single_mask = attention_mask[i : i + 1]
+                single_ids = prompt_ids[i : i + 1]
+                single_mask = prompt_mask[i : i + 1]
                 single_pv = pixel_values[i : i + 1]
                 single_pr = proprio[i : i + 1] if proprio is not None else None
                 actions_np, _ = self.vla.predict_action(
