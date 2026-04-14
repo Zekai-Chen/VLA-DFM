@@ -120,6 +120,7 @@ class RLFinetuneEntryConfig:
     # Logging
     use_wandb: bool = False
     wandb_project: str = "dfm-rl"
+    wandb_entity: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +313,7 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         save_dir=str(cfg.run_root_dir / "rl_dfm"),
         use_wandb=cfg.use_wandb,
         wandb_project=cfg.wandb_project,
+        wandb_entity=cfg.wandb_entity,
     )
 
     # ── Environment ──────────────────────────────────────────────────────────

@@ -146,6 +146,7 @@ class RLFinetuneConfig:
     save_dir: str = "checkpoints/rl_dfm"
     use_wandb: bool = False
     wandb_project: str = "dfm-rl"
+    wandb_entity: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +338,11 @@ class DFMRLTrainer:
 
         if self.cfg.use_wandb:
             import wandb
-            wandb.init(project=self.cfg.wandb_project, config=vars(self.cfg))
+            wandb.init(
+                project=self.cfg.wandb_project,
+                entity=self.cfg.wandb_entity,
+                config=vars(self.cfg),
+            )
 
     # ------------------------------------------------------------------
     # Step 1: Collect rollouts
