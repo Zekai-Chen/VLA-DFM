@@ -14,8 +14,6 @@ Usage:
         --task_suite libero_object \
         --num_tasks 10 --num_trials 2
 """
-from __future__ import annotations
-
 import json
 import logging
 import os
