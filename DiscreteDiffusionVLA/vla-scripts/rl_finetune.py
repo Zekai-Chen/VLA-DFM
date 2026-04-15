@@ -75,6 +75,8 @@ class RLFinetuneEntryConfig:
     rollout_episodes: int = 5
     max_transitions: int = 200
     batch_size: int = 8
+    algo: str = "ppo"                  # "ppo" or "rwr"
+    rwr_beta: float = 1.0
     ppo_clip_eps: float = 0.2
     lambda_constraint: float = 1.0
     ppo_epochs: int = 4
@@ -289,6 +291,8 @@ def main(cfg: RLFinetuneEntryConfig) -> None:
         rollout_episodes=cfg.rollout_episodes,
         max_transitions=cfg.max_transitions,
         batch_size=cfg.batch_size,
+        algo=cfg.algo,
+        rwr_beta=cfg.rwr_beta,
         ppo_clip_eps=cfg.ppo_clip_eps,
         lambda_constraint=cfg.lambda_constraint,
         ppo_epochs=cfg.ppo_epochs,

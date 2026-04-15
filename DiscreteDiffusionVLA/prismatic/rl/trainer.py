@@ -106,6 +106,10 @@ class RLFinetuneConfig:
     max_transitions: int = 200        # cap total transitions per iteration
     batch_size: int = 8               # samples per gradient update
 
+    # ── Algorithm ──────────────────────────────────────────────────────────
+    algo: str = "ppo"                 # "ppo" (Algorithm 1) or "rwr" (baseline)
+    rwr_beta: float = 1.0             # RWR temperature: weight = exp(return / beta)
+
     # ── PPO / ratio network ────────────────────────────────────────────────
     ppo_clip_eps: float = 0.2         # ε
     lambda_constraint: float = 1.0   # λ
@@ -639,6 +643,86 @@ class DFMRLTrainer:
         }
 
     # ------------------------------------------------------------------
+    # RWR baseline: Reward-Weighted Regression (no ratio network, no PPO)
+    # ------------------------------------------------------------------
+    def update_policy_rwr(self, batch: dict) -> Dict[str, float]:
+        """Baseline non-PPO method: weight DFM loss by exp(return/β).
+
+        ``return`` here uses the Monte-Carlo/GAE return stored in the buffer.
+        With sparse binary reward (success=1, failure=0), this reduces to
+        up-weighting transitions from successful episodes by a factor
+        exp(γ^(T-t) / β); failures get weight 1.
+        """
+        self.vla.train()
+        B = batch["input_ids"].shape[0]
+        mb = max(1, int(self.cfg.update_mini_batch))
+        action_pos_mask = batch["action_positions_mask"].to(self.device)
+
+        # Reward-weighted: weights = exp(return / beta), clipped for stability
+        returns = batch["returns"].to(device=self.device, dtype=self._model_dtype)
+        weights = torch.exp(returns / self.cfg.rwr_beta).clamp(max=20.0)
+        weights = weights.detach()
+
+        total_loss = 0.0
+        total_samples = 0
+        for _ in range(self.cfg.dfm_epochs):
+            self.vla_optimizer.zero_grad()
+            for i in range(0, B, mb):
+                j = min(i + mb, B)
+                iids = batch["input_ids"][i:j].to(self.device)
+                amask = batch["attention_mask"][i:j].to(self.device)
+                pix = batch["pixel_values"][i:j].to(device=self.device, dtype=self._model_dtype)
+                lbl = batch["labels"][i:j].to(self.device)
+                apmask = action_pos_mask[i:j]
+                w = weights[i:j]
+
+                embeddings = self.vla.get_input_embeddings()(iids)
+                (
+                    masked_input_ids, _me, masked_labels, _lm, kappa_t, kdot_t, _t,
+                ) = self.vla.apply_mask_flow_matching(
+                    input_ids=iids, input_embeddings=embeddings, labels=lbl,
+                    loss_mask_full=apmask, mask_token_id=self.mask_token_id,
+                    schedule=self.cfg.dfm_schedule, time_eps=self.cfg.dfm_time_eps,
+                    t_min=self.cfg.dfm_t_min, t_max=self.cfg.dfm_t_max,
+                    t_bias_alpha=self.cfg.dfm_t_bias_alpha,
+                )
+                with _disable_dfm(self.vla):
+                    out = self.vla(
+                        input_ids=masked_input_ids, attention_mask=amask,
+                        pixel_values=pix, labels=masked_labels,
+                        output_hidden_states=False,
+                    )
+                logits_text = self._strip_patches(out.logits, masked_input_ids.shape[1])
+                shift_logits = logits_text[:, :-1, :]
+                shift_xt = masked_input_ids[:, 1:]
+                shift_x1 = lbl[:, 1:]
+                shift_act_mask = apmask[:, 1:]
+                per_sample = dfm_gkl_loss_per_sample(
+                    shift_logits=shift_logits, x1=shift_x1, xt=shift_xt,
+                    action_mask=shift_act_mask, kappa_t=kappa_t, kdot_t=kdot_t,
+                    action_begin=self.action_begin, action_end=self.action_end,
+                    mask_id=self.mask_token_id, weight_clip=self.cfg.dfm_weight_clip,
+                )
+                loss = (w * per_sample).sum() / B
+                loss.backward()
+                total_loss += loss.item() * B
+                total_samples += (j - i)
+                del out, logits_text, shift_logits, embeddings
+                torch.cuda.empty_cache()
+
+            nn.utils.clip_grad_norm_(
+                filter(lambda p: p.requires_grad, self.vla.parameters()),
+                self.cfg.dfm_grad_clip,
+            )
+            self.vla_optimizer.step()
+
+        return {
+            "policy/rwr_loss": total_loss / max(total_samples, 1),
+            "policy/rwr_mean_weight": weights.mean().item(),
+            "policy/rwr_max_weight": weights.max().item(),
+        }
+
+    # ------------------------------------------------------------------
     # Value network update
     # ------------------------------------------------------------------
 
@@ -678,13 +762,18 @@ class DFMRLTrainer:
 
             batch = self.buffer.get_batch(device=self.device)
 
-            # --- Step 3: ratio network ---
-            all_metrics.update(self.update_ratio_network(batch))
+            if self.cfg.algo == "ppo":
+                # --- Step 3: ratio network ---
+                all_metrics.update(self.update_ratio_network(batch))
+                # --- Step 4: weighted DFM policy ---
+                all_metrics.update(self.update_policy(batch))
+            elif self.cfg.algo == "rwr":
+                # RWR baseline: no ratio network, weight DFM loss by exp(R/beta)
+                all_metrics.update(self.update_policy_rwr(batch))
+            else:
+                raise ValueError(f"Unknown algo: {self.cfg.algo}")
 
-            # --- Step 4: DFM policy ---
-            all_metrics.update(self.update_policy(batch))
-
-            # --- Value network ---
+            # --- Value network (useful for both) ---
             all_metrics.update(self.update_value_network(batch))
 
             self.global_step += 1
