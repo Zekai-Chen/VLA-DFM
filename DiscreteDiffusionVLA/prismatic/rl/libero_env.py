@@ -292,9 +292,16 @@ class LiberoRLEnv:
             done_scalar = True
 
         obs = self._make_obs(raw_obs)
-        reward = torch.tensor([float(reward_scalar)])
         done = torch.tensor([bool(done_scalar)])
-        info_out = {"success": torch.tensor([float(done_scalar and reward_scalar > 0)])}
+        success = bool(done_scalar and reward_scalar > 0)
+        # Failure penalty: +1 for success, -1 for failure (not 0).
+        # Gives stronger gradient signal than sparse 0/1.
+        if done_scalar:
+            shaped_reward = 1.0 if success else -1.0
+        else:
+            shaped_reward = 0.0
+        reward = torch.tensor([shaped_reward])
+        info_out = {"success": torch.tensor([float(success)])}
         return obs, reward, done, info_out
 
     # ------------------------------------------------------------------

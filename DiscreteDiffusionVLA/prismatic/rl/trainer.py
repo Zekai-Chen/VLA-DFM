@@ -109,6 +109,7 @@ class RLFinetuneConfig:
     # ── Algorithm ──────────────────────────────────────────────────────────
     algo: str = "ppo"                 # "ppo" (Algorithm 1) or "rwr" (baseline)
     rwr_beta: float = 1.0             # RWR temperature: weight = exp(return / beta)
+    kl_beta: float = 0.01             # KL penalty coefficient (0 = disabled)
 
     # ── PPO / ratio network ────────────────────────────────────────────────
     ppo_clip_eps: float = 0.2         # ε
@@ -559,6 +560,7 @@ class DFMRLTrainer:
         torch.cuda.empty_cache()
 
         total_loss = 0.0
+        total_kl = 0.0
         total_samples = 0
         for _ in range(self.cfg.dfm_epochs):
             # Process in mini-batches: accumulate gradients via backward()
@@ -624,8 +626,37 @@ class DFMRLTrainer:
 
                 # Scale by 1/B so that sum of mini-batch grads = full batch grad
                 loss = (w * per_sample).sum() / B
+
+                # KL penalty: prevent drift from supervised baseline.
+                # Disable LoRA adapters to get reference (supervised) logits.
+                kl_loss_val = 0.0
+                if self.cfg.kl_beta > 0 and hasattr(self.vla, "disable_adapter_layers"):
+                    with torch.no_grad(), _disable_dfm(self.vla):
+                        self.vla.disable_adapter_layers()
+                        ref_out = self.vla(
+                            input_ids=masked_input_ids,
+                            attention_mask=amask,
+                            pixel_values=pix,
+                            labels=masked_labels,
+                            output_hidden_states=False,
+                        )
+                        self.vla.enable_adapter_layers()
+                    ref_logits = self._strip_patches(ref_out.logits, masked_input_ids.shape[1])
+                    ref_shift = ref_logits[:, :-1, :].detach()
+                    # KL(current || reference) over action positions
+                    cur_lp = torch.log_softmax(shift_logits, dim=-1)
+                    ref_lp = torch.log_softmax(ref_shift, dim=-1)
+                    kl_per_token = torch.sum(
+                        torch.exp(cur_lp) * (cur_lp - ref_lp), dim=-1
+                    )  # (mb, T-1)
+                    kl_masked = (kl_per_token * shift_act_mask.float()).sum() / shift_act_mask.float().sum().clamp(min=1)
+                    loss = loss + self.cfg.kl_beta * kl_masked / B
+                    kl_loss_val = kl_masked.item()
+                    del ref_out, ref_logits, ref_shift
+
                 loss.backward()
-                total_loss += loss.item() * B  # restore scale for reporting
+                total_loss += loss.item() * B
+                total_kl += kl_loss_val
                 total_samples += (j - i)
 
                 del vla_out, logits_text, shift_logits, embeddings
@@ -640,6 +671,7 @@ class DFMRLTrainer:
         return {
             "policy/weighted_dfm_loss": total_loss / max(total_samples, 1),
             "policy/mean_weight": weights.mean().item(),
+            "policy/kl_divergence": total_kl / max(self.cfg.dfm_epochs, 1),
         }
 
     # ------------------------------------------------------------------
@@ -664,6 +696,7 @@ class DFMRLTrainer:
         weights = weights.detach()
 
         total_loss = 0.0
+        total_kl = 0.0
         total_samples = 0
         for _ in range(self.cfg.dfm_epochs):
             self.vla_optimizer.zero_grad()
@@ -704,8 +737,31 @@ class DFMRLTrainer:
                     mask_id=self.mask_token_id, weight_clip=self.cfg.dfm_weight_clip,
                 )
                 loss = (w * per_sample).sum() / B
+
+                # KL penalty (same as PPO update)
+                kl_loss_val = 0.0
+                if self.cfg.kl_beta > 0 and hasattr(self.vla, "disable_adapter_layers"):
+                    with torch.no_grad(), _disable_dfm(self.vla):
+                        self.vla.disable_adapter_layers()
+                        ref_out = self.vla(
+                            input_ids=masked_input_ids, attention_mask=amask,
+                            pixel_values=pix, labels=masked_labels,
+                            output_hidden_states=False,
+                        )
+                        self.vla.enable_adapter_layers()
+                    ref_logits = self._strip_patches(ref_out.logits, masked_input_ids.shape[1])
+                    ref_shift = ref_logits[:, :-1, :].detach()
+                    cur_lp = torch.log_softmax(shift_logits, dim=-1)
+                    ref_lp = torch.log_softmax(ref_shift, dim=-1)
+                    kl_per_token = torch.sum(torch.exp(cur_lp) * (cur_lp - ref_lp), dim=-1)
+                    kl_masked = (kl_per_token * shift_act_mask.float()).sum() / shift_act_mask.float().sum().clamp(min=1)
+                    loss = loss + self.cfg.kl_beta * kl_masked / B
+                    kl_loss_val = kl_masked.item()
+                    del ref_out, ref_logits, ref_shift
+
                 loss.backward()
                 total_loss += loss.item() * B
+                total_kl += kl_loss_val
                 total_samples += (j - i)
                 del out, logits_text, shift_logits, embeddings
                 torch.cuda.empty_cache()
@@ -720,6 +776,7 @@ class DFMRLTrainer:
             "policy/rwr_loss": total_loss / max(total_samples, 1),
             "policy/rwr_mean_weight": weights.mean().item(),
             "policy/rwr_max_weight": weights.max().item(),
+            "policy/kl_divergence": total_kl / max(self.cfg.dfm_epochs, 1),
         }
 
     # ------------------------------------------------------------------
