@@ -42,6 +42,7 @@ cp -r LIBERO/libero $(python -c "import site; print(site.getsitepackages()[0])")
 
 # Install LIBERO requirements
 pip install robosuite==1.4.1 mujoco bddl easydict cloudpickle gym "imageio[ffmpeg]"
+# conda install -c conda-forge mesalib
 sudo apt-get install -y libosmesa6-dev libegl1-mesa-dev libgl1-mesa-dev
 
 # IMPORTANT: robosuite pulls numpy>=2.0 — must downgrade AGAIN
@@ -67,6 +68,7 @@ YAML
 huggingface-cli download openvla/openvla-7b --local-dir ~/data/models/openvla-7b
 
 # LIBERO RLDS dataset (~20GB, needs git-lfs)
+# conda install -c conda-forge git-lfs && git lfs install
 sudo apt-get install -y git-lfs && git lfs install
 git clone https://huggingface.co/datasets/openvla/modified_libero_rlds ~/data/RLDS/modified_libero_rlds
 ```
