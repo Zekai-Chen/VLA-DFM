@@ -11,9 +11,19 @@ set -euo pipefail
 #   bash scripts/train_dfm.sh --resume /path/to/checkpoint-7000  # specific checkpoint
 
 # ── Paths (edit these) ─────────────────────────────────────────────
-VLA_PATH="${VLA_PATH:-$HOME/data/models/openvla-7b}"
-DATA_ROOT="${DATA_ROOT:-$HOME/data/RLDS/modified_libero_rlds}"
-RUN_ROOT="${RUN_ROOT:-$HOME/checkpoints/dfm-vla-320k}"
+# VLA_PATH="${VLA_PATH:-$HOME/data/models/openvla-7b}"
+# DATA_ROOT="${DATA_ROOT:-$HOME/data/RLDS/modified_libero_rlds}"
+# RUN_ROOT="${RUN_ROOT:-$HOME/checkpoints/dfm-vla-320k}"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+# Prefer this repo's prismatic/ over any pip-installed openvla copy (avoids ModuleNotFoundError: prismatic.vla.action_vocab).
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# ── Paths (edit these or use env overrides) ────────────────────────
+VLA_PATH="${VLA_PATH:-$REPO_ROOT/data/models/openvla-7b}"
+DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data/RLDS/modified_libero_rlds}"
+RUN_ROOT="${RUN_ROOT:-$REPO_ROOT/checkpoints/dfm-vla-320k}"
 DATASET_NAME="${DATASET_NAME:-libero_object_no_noops}"
 
 # ── Hardware ───────────────────────────────────────────────────────
