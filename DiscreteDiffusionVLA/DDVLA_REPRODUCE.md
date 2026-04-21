@@ -99,31 +99,11 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune.py \
 ### Resume from checkpoint
 
 ```bash
+# Auto-find latest checkpoint:
+bash scripts/train_ddvla.sh --resume
+
+# Or resume from specific checkpoint:
 bash scripts/train_ddvla.sh --resume ~/checkpoints/ddvla-320k/<run_dir>/checkpoint-7000
-```
-
-Or manually:
-
-```bash
-torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune.py \
-    --vla_path ~/checkpoints/ddvla-320k/<run_dir>/checkpoint-7000 \
-    --data_root_dir ~/data/RLDS/modified_libero_rlds \
-    --dataset_name libero_object_no_noops \
-    --run_root_dir ~/checkpoints/ddvla-320k \
-    --use_discrete_diffusion True \
-    --use_l1_regression False \
-    --use_diffusion False \
-    --use_film False \
-    --num_images_in_input 2 \
-    --use_proprio True \
-    --batch_size 8 \
-    --learning_rate 5e-4 \
-    --num_steps_before_decay 100000 \
-    --max_steps 320000 \
-    --save_freq 7000 \
-    --save_latest_checkpoint_only False \
-    --image_aug True \
-    --lora_rank 32
 ```
 
 ### Training time estimates

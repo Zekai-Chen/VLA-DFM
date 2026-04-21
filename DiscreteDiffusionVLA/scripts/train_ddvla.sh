@@ -26,11 +26,27 @@ DECAY_START=100000
 LORA_RANK=32
 
 # ── Resume handling ────────────────────────────────────────────────
-RESUME_PATH=""
-if [[ "${1:-}" == "--resume" ]] && [[ -n "${2:-}" ]]; then
-    RESUME_PATH="$2"
-    VLA_PATH="$RESUME_PATH"
-    echo "Resuming from: $RESUME_PATH"
+# Usage:
+#   --resume /path/to/checkpoint-7000    Resume from specific checkpoint
+#   --resume latest                      Auto-find latest checkpoint in RUN_ROOT
+#   --resume                             Same as --resume latest
+RESUME_ARGS=""
+if [[ "${1:-}" == "--resume" ]]; then
+    RESUME_TARGET="${2:-latest}"
+    if [[ "$RESUME_TARGET" == "latest" ]]; then
+        # Find the latest checkpoint directory
+        LATEST=$(find "$RUN_ROOT" -maxdepth 3 -name "checkpoint-*" -type d 2>/dev/null | sort -t- -k2 -n | tail -1)
+        if [[ -z "$LATEST" ]]; then
+            echo "ERROR: No checkpoint found in $RUN_ROOT"
+            exit 1
+        fi
+        RESUME_TARGET="$LATEST"
+    fi
+    # Extract step number from checkpoint dir name (e.g., checkpoint-7000 → 7000)
+    RESUME_STEP=$(basename "$RESUME_TARGET" | grep -oP '\d+')
+    VLA_PATH="$RESUME_TARGET"
+    RESUME_ARGS="--resume True --resume_step $RESUME_STEP"
+    echo "Resuming from: $RESUME_TARGET (step $RESUME_STEP)"
 fi
 
 # ── Diagnostics ────────────────────────────────────────────────────
@@ -64,4 +80,5 @@ torchrun --standalone --nnodes 1 --nproc-per-node "$NPROC" vla-scripts/finetune.
     --save_freq $SAVE_FREQ \
     --save_latest_checkpoint_only False \
     --image_aug True \
-    --lora_rank $LORA_RANK
+    --lora_rank $LORA_RANK \
+    $RESUME_ARGS
