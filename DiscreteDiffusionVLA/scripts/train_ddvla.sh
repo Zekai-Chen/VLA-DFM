@@ -34,19 +34,20 @@ RESUME_ARGS=""
 if [[ "${1:-}" == "--resume" ]]; then
     RESUME_TARGET="${2:-latest}"
     if [[ "$RESUME_TARGET" == "latest" ]]; then
-        # Find the latest checkpoint directory
-        LATEST=$(find "$RUN_ROOT" -maxdepth 3 -name "checkpoint-*" -type d 2>/dev/null | sort -t- -k2 -n | tail -1)
-        if [[ -z "$LATEST" ]]; then
-            echo "ERROR: No checkpoint found in $RUN_ROOT"
-            exit 1
+        FOUND=$(find "$RUN_ROOT" -maxdepth 3 -name "checkpoint-*" -type d 2>/dev/null | sort -t- -k2 -n | tail -1)
+        if [[ -z "$FOUND" ]]; then
+            echo "No checkpoint found in $RUN_ROOT — starting fresh"
+            RESUME_TARGET=""
+        else
+            RESUME_TARGET="$FOUND"
         fi
-        RESUME_TARGET="$LATEST"
     fi
-    # Extract step number from checkpoint dir name (e.g., checkpoint-7000 → 7000)
-    RESUME_STEP=$(basename "$RESUME_TARGET" | grep -oP '\d+')
-    VLA_PATH="$RESUME_TARGET"
-    RESUME_ARGS="--resume True --resume_step $RESUME_STEP"
-    echo "Resuming from: $RESUME_TARGET (step $RESUME_STEP)"
+    if [[ -n "$RESUME_TARGET" ]]; then
+        RESUME_STEP=$(basename "$RESUME_TARGET" | grep -oP '\d+')
+        VLA_PATH="$RESUME_TARGET"
+        RESUME_ARGS="--resume True --resume_step $RESUME_STEP"
+        echo "Resuming from: $RESUME_TARGET (step $RESUME_STEP)"
+    fi
 fi
 
 # ── Diagnostics ────────────────────────────────────────────────────
