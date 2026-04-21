@@ -7,24 +7,29 @@
 conda create -n ddvla python=3.10 -y
 conda activate ddvla
 
-# PyTorch (use cu121 for A100/H100, nightly for B200)
+# Clone and install DDVLA (this installs torch 2.2.0 as dependency)
+git clone https://github.com/Liang-ZX/DiscreteDiffusionVLA.git DDVLA
+cd DDVLA
+pip install -e .
+
+# IMPORTANT: reinstall PyTorch AFTER pip install -e . (which downgrades to 2.2.0)
 # A100/H100:
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 # B200 (sm_100, needs nightly):
 # pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
 
-# Clone and install DDVLA
-git clone https://github.com/Liang-ZX/DiscreteDiffusionVLA.git DDVLA
-cd DDVLA
-pip install -e .
-
-# Fix dependency versions
-pip install "peft>=0.17,<0.19" "transformers>=4.45,<4.50" "diffusers>=0.27" "numpy<2.0"
+# Fix dependency versions (exact combo that works)
+pip install peft==0.18.1 transformers==4.49.0 "diffusers>=0.27" "numpy<2.0"
 pip install tensorflow tensorflow_datasets dlimp draccus
 
-# Flash Attention (A100/H100 only, optional but recommended)
+# Flash Attention (A100/H100 only, optional — speeds up training ~10%)
+# MUST be compiled from source AFTER PyTorch is at final version
 pip install packaging ninja
-pip install "flash-attn>=2.5" --no-build-isolation
+pip install flash-attn --no-build-isolation  # compiles from source, takes ~15 min
+# If flash-attn fails to import, training still works without it (just slower)
+
+# IMPORTANT: numpy must be <2.0 (tensorflow/torch conflict). Install LAST.
+pip install "numpy<2.0"
 
 # LIBERO evaluation environment
 git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
