@@ -39,6 +39,9 @@ cp -r LIBERO/libero $(python -c "import site; print(site.getsitepackages()[0])")
 pip install robosuite==1.4.1 mujoco bddl easydict cloudpickle gym imageio[ffmpeg]
 sudo apt-get install -y libosmesa6-dev libegl1-mesa-dev libgl1-mesa-dev
 
+# IMPORTANT: robosuite pulls numpy>=2.0 — must downgrade AGAIN
+pip install "numpy<2.0"
+
 # Setup LIBERO config
 mkdir -p ~/.libero
 cat > ~/.libero/config.yaml << 'YAML'

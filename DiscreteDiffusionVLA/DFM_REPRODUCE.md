@@ -45,6 +45,9 @@ cp -r LIBERO/libero $(python -c "import site; print(site.getsitepackages()[0])")
 pip install robosuite==1.4.1 mujoco bddl easydict cloudpickle gym "imageio[ffmpeg]"
 sudo apt-get install -y libosmesa6-dev libegl1-mesa-dev libgl1-mesa-dev
 
+# IMPORTANT: robosuite pulls numpy>=2.0 — must downgrade AGAIN
+pip install "numpy<2.0"
+
 # Setup LIBERO config (update paths to match your setup)
 mkdir -p ~/.libero
 cat > ~/.libero/config.yaml << 'YAML'
@@ -81,7 +84,23 @@ print('gpus:', torch.cuda.device_count())
 "
 ```
 
-## 5. Training
+**Troubleshooting**: If torch version shows wrong or imports fail, check for stale user site-packages:
+```bash
+python -c "import torch; print(torch.__file__)"
+# If path is ~/.local/... instead of conda env, either:
+#   pip uninstall torch  (from ~/.local)
+# or prefix all commands with:
+#   export PYTHONNOUSERSITE=1
+```
+
+## 5. Setup Weights & Biases
+
+```bash
+wandb login
+# Enter your API key from https://wandb.ai/authorize
+```
+
+## 6. Training
 
 ### Fresh start (paper configuration)
 
@@ -125,7 +144,7 @@ The script `scripts/train_dfm.sh` runs with these parameters:
 
 *B200 single-GPU has lower total batch (24 vs 64), so total samples seen = 37.5% of paper config.
 
-## 6. Evaluation
+## 7. Evaluation
 
 ```bash
 # Standard LIBERO eval (500 trials = 10 tasks × 50 episodes)
@@ -138,7 +157,7 @@ bash scripts/eval_ddvla.sh ~/checkpoints/dfm-vla-320k/<run_dir>/checkpoint-32000
 
 Note: `eval_ddvla.sh` works for both DD and DFM checkpoints — it reads the model config to determine the decode method.
 
-## 7. Key Differences: DFM vs DD
+## 8. Key Differences: DFM vs DD
 
 | | Discrete Diffusion (DD) | Discrete Flow Matching (DFM) |
 |---|---|---|
