@@ -32,7 +32,7 @@ pip install flash-attn --no-build-isolation  # compiles from source, takes ~15 m
 pip install "numpy<2.0"
 
 # LIBERO evaluation environment
-git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+# LIBERO is already included in the repo at DiscreteDiffusionVLA/LIBERO/
 pip install -e LIBERO
 # Fix: copy libero package to site-packages
 cp -r LIBERO/libero $(python -c "import site; print(site.getsitepackages()[0])")/libero
@@ -42,17 +42,17 @@ sudo apt-get install -y libosmesa6-dev libegl1-mesa-dev libgl1-mesa-dev
 # IMPORTANT: robosuite pulls numpy>=2.0 — must downgrade AGAIN
 pip install "numpy<2.0"
 
-# Setup LIBERO config
+# Setup LIBERO config (LIBERO_ROOT = path to DiscreteDiffusionVLA/LIBERO)
+LIBERO_ROOT="$(pwd)/LIBERO"
 mkdir -p ~/.libero
-cat > ~/.libero/config.yaml << 'YAML'
-assets: /path/to/LIBERO/libero/libero/./assets
-bddl_files: /path/to/LIBERO/libero/libero/./bddl_files
-benchmark_root: /path/to/LIBERO/libero/libero
-datasets: /path/to/LIBERO/libero/libero/../datasets
-init_states: /path/to/LIBERO/libero/libero/./init_files
-init_files: /path/to/LIBERO/libero/libero/./init_files
+cat > ~/.libero/config.yaml << YAML
+assets: ${LIBERO_ROOT}/libero/libero/./assets
+bddl_files: ${LIBERO_ROOT}/libero/libero/./bddl_files
+benchmark_root: ${LIBERO_ROOT}/libero/libero
+datasets: ${LIBERO_ROOT}/libero/libero/../datasets
+init_states: ${LIBERO_ROOT}/libero/libero/./init_files
+init_files: ${LIBERO_ROOT}/libero/libero/./init_files
 YAML
-# NOTE: update /path/to/LIBERO to your actual LIBERO repo path
 ```
 
 ## 2. Download Data
