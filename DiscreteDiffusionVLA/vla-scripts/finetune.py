@@ -1061,9 +1061,11 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.empty_cache()
     torch_dtype = resolve_torch_dtype(cfg.torch_dtype)
 
-    # Initialize wandb logging
+    # Initialize wandb logging (placeholder entity/project cause W&B 404 upsertBucket)
     if distributed_state.is_main_process:
-        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
+        wb_entity = cfg.wandb_entity if cfg.wandb_entity not in ("", "your-wandb-entity") else None
+        wb_project = cfg.wandb_project if cfg.wandb_project not in ("", "your-wandb-project") else None
+        wandb.init(entity=wb_entity, project=wb_project, name=f"ft+{run_id}")
 
     # Optional DFM mask-trace logging
     dfm_trace_path = None

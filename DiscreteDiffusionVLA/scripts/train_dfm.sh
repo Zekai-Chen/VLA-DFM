@@ -20,6 +20,17 @@ cd "$REPO_ROOT"
 # Prefer this repo's prismatic/ over any pip-installed openvla copy (avoids ModuleNotFoundError: prismatic.vla.action_vocab).
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# Hugging Face: keep hub + trust_remote_code modules under this repo instead of
+# shared Lustre home_cache (avoids stale transformers_modules/openvla-7b).
+# Opt back into cache_env.sh HF paths: DFM_USE_SHARED_HF_CACHE=1
+if [[ "${DFM_USE_SHARED_HF_CACHE:-0}" != "1" ]]; then
+    export HF_HOME="${DFM_HF_HOME:-$REPO_ROOT/.hf_cache}"
+    export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+    export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+    export HF_DATASETS_CACHE="$HF_HOME/datasets"
+    mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE"
+fi
+
 # ── Paths (edit these or use env overrides) ────────────────────────
 VLA_PATH="${VLA_PATH:-$REPO_ROOT/data/models/openvla-7b}"
 DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data/RLDS/modified_libero_rlds}"

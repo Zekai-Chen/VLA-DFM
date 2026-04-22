@@ -137,6 +137,9 @@ dmypy.json
 
 # Auth Tokens / Hidden Files
 .hf_token
+
+# Repo-local Hugging Face cache (see scripts/train_dfm.sh)
+.hf_cache/
 .wandb_api_key
 .*_token
 .*api_key

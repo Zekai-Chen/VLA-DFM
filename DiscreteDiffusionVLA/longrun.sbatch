@@ -16,24 +16,53 @@ set -euo pipefail
 
 # DFM: always runs scripts/train_dfm.sh --resume (latest checkpoint under RUN_ROOT, see train_dfm.sh).
 #
+# Arg1 SEG — chain segment index (1..MAX_SEG). Passed through by sbatch requeue; no state files / folders.
+#
 # Usage:
 #   sbatch longrun.sbatch
+#   sbatch longrun.sbatch 1
 #
-# Optional: export CONDA_ENV=ddvla (default), VLA_PATH, DATA_ROOT, RUN_ROOT before sbatch.
+# Parallel chains: use distinct --job-name so singleton does not block each other.
+#
+# Optional: export CONDA_ENV=dfm-vla (default), MAX_SEG (default 25), VLA_PATH, DATA_ROOT, RUN_ROOT before sbatch.
+# HF cache: scripts/train_dfm.sh redirects HF_HOME to REPO/.hf_cache (not home_cache).
+#           Set DFM_USE_SHARED_HF_CACHE=1 before sbatch to keep cache_env.sh HF paths.
 
-DDVLA_ROOT="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA"
+DFM_ROOT="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA"
+LONGRUN_SBATCH="${LONGRUN_SBATCH:-${DFM_ROOT}/longrun.sbatch}"
 CONDA_SH="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Apps/miniforge3/etc/profile.d/conda.sh"
 CACHE_ENV="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/cache_env.sh"
 CONDA_ENV="${CONDA_ENV:-dfm-vla}"
 NGPU=8
+MAX_SEG="${MAX_SEG:-25}"
+SEG="${1:-1}"
 
 mkdir -p logs
 
+if ! [[ "${SEG}" =~ ^[0-9]+$ ]] || [[ "${SEG}" -lt 1 ]]; then
+    echo "Invalid SEG='${SEG}' (need positive integer). Usage: sbatch longrun.sbatch [SEG]" >&2
+    exit 1
+fi
+
+if [[ "${SEG}" -gt "${MAX_SEG}" ]]; then
+    echo "SEG=${SEG} > MAX_SEG=${MAX_SEG}; chain finished, exiting."
+    exit 0
+fi
+
 echo "========== Job =========="
+echo "SEG=${SEG}/${MAX_SEG}"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}  JOB_NAME=${SLURM_JOB_NAME:-}"
 echo "HOSTNAME=$(hostname)  PWD=${PWD}"
-echo "DDVLA_ROOT=${DDVLA_ROOT}  (train_ddvla.sh --resume)"
+echo "DFM_ROOT=${DFM_ROOT}  (train_dfm.sh --resume)"
 echo "========================="
+
+############################
+# Pre-schedule next segment (same pattern as Psi0-hojune / DDVLA longrun: survives SIGTERM / pre-timeout)
+############################
+if [[ "${SEG}" -lt "${MAX_SEG}" ]]; then
+    echo "Scheduling follow-up: SEG=$((SEG + 1)) / MAX_SEG=${MAX_SEG}"
+    sbatch --dependency=singleton --job-name="${SLURM_JOB_NAME:-dfm_longrun}" "${LONGRUN_SBATCH}" "$((SEG + 1))"
+fi
 
 SRUN_PID=""
 
@@ -66,7 +95,7 @@ srun \
         # conda activate.d hooks (e.g. cuda-nvcc) reference unset vars; nounset breaks them.
         set +u
         conda activate ${CONDA_ENV}
-        cd ${DDVLA_ROOT}
+        cd ${DFM_ROOT}
         set -u
         # export WANDB_API_KEY=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
         # zekai‘s wandb key
