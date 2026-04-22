@@ -1553,7 +1553,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # [If applicable] Linearly warm up learning rate from 10% to 100% of original
             if cfg.lr_warmup_steps > 0:
-                lr_progress = min((gradient_step_idx + 1) / cfg.lr_warmup_steps, 1.0)  # Cap at 1.0
+                warmup_step = log_step if cfg.resume else gradient_step_idx
+                lr_progress = min((warmup_step + 1) / cfg.lr_warmup_steps, 1.0)  # Cap at 1.0
                 current_lr = original_lr * (0.1 + 0.9 * lr_progress)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = current_lr
@@ -1612,7 +1613,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 vla.train()
 
             # Stop training when max_steps is reached
-            if log_step == cfg.max_steps:
+            if log_step >= cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
 
