@@ -1313,6 +1313,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         gamma=0.1,  # Multiplicative factor of learning rate decay
     )
 
+    if cfg.resume and cfg.resume_step is not None:
+        for _ in range(cfg.resume_step):
+            scheduler.step()
+
     # Create Action Tokenizer
     model_cfg = getattr(vla, "module", vla)
     n_action_bins = getattr(getattr(model_cfg, "config", None), "n_action_bins", None)
