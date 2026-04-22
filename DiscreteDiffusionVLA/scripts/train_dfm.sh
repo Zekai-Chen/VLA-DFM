@@ -66,7 +66,7 @@ RESUME_ARGS=""
 if [[ "${1:-}" == "--resume" ]]; then
     RESUME_TARGET="${2:-latest}"
     if [[ "$RESUME_TARGET" == "latest" ]]; then
-        FOUND=$(find "$RUN_ROOT" -maxdepth 3 -name "*_chkpt" -type d 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
+        FOUND=$(find "$RUN_ROOT" -maxdepth 3 -name "*_chkpt" -type d 2>/dev/null | sed 's/.*--\([0-9]*\)_chkpt/\1 &/' | sort -n | tail -1 | cut -d' ' -f2 || true)
         if [[ -z "$FOUND" ]]; then
             echo "No checkpoint found in $RUN_ROOT — starting fresh"
             RESUME_TARGET=""
