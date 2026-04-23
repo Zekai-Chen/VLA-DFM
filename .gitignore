@@ -28,3 +28,5 @@ eval-results/DFM_eval_20k_gripper_debug_false_model_0305_1930/0305_1930/
 *.log
 *.jsonl
 *.txt
+DiscreteDiffusionVLA/.hf_cache_ddvla/
+DiscreteDiffusionVLA/runs/

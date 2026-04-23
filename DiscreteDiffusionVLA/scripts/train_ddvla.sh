@@ -8,10 +8,25 @@ set -euo pipefail
 #   bash scripts/train_ddvla.sh                                    # fresh start
 #   bash scripts/train_ddvla.sh --resume /path/to/checkpoint-7000  # resume
 
-# ── Paths (edit these) ─────────────────────────────────────────────
-VLA_PATH="${VLA_PATH:-$HOME/data/models/openvla-7b}"
-DATA_ROOT="${DATA_ROOT:-$HOME/data/RLDS/modified_libero_rlds}"
-RUN_ROOT="${RUN_ROOT:-$HOME/checkpoints/ddvla-320k}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+# Prefer this repo's prismatic/ over any pip-installed copy.
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Hugging Face: separate cache from train_dfm.sh (.hf_cache); default .hf_cache_ddvla.
+# Opt back into cache_env.sh HF paths: DDVLA_USE_SHARED_HF_CACHE=1
+if [[ "${DDVLA_USE_SHARED_HF_CACHE:-0}" != "1" ]]; then
+    export HF_HOME="${DDVLA_HF_HOME:-$REPO_ROOT/.hf_cache_ddvla}"
+    export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+    export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+    export HF_DATASETS_CACHE="$HF_HOME/datasets"
+    mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE"
+fi
+
+# ── Paths (edit these or use env overrides) ────────────────────────
+VLA_PATH="${VLA_PATH:-$REPO_ROOT/data/models/openvla-7b}"
+DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data/RLDS/modified_libero_rlds}"
+RUN_ROOT="${RUN_ROOT:-$REPO_ROOT/runs/ddvla-320k}"
 DATASET_NAME="${DATASET_NAME:-libero_object_no_noops}"
 
 # ── Hardware ───────────────────────────────────────────────────────
@@ -60,6 +75,8 @@ echo "  Batch: ${BATCH_SIZE}/GPU x ${NPROC} GPUs = $((BATCH_SIZE * NPROC)) total
 echo "  Steps: $MAX_STEPS"
 echo "  Save freq: $SAVE_FREQ (~$((SAVE_FREQ * 16 / 36000))h on 8xA100)"
 echo "  LoRA rank: $LORA_RANK"
+echo "  HF_HOME: ${HF_HOME:-}"
+echo "  RUN_ROOT: $RUN_ROOT"
 echo "========================================="
 
 # ── Launch ─────────────────────────────────────────────────────────

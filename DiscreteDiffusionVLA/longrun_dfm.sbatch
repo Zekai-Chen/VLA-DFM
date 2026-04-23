@@ -9,8 +9,11 @@
 #SBATCH --time=04:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH -J dfm_longrun
-#SBATCH -o logs/%x_%j.out
-#SBATCH -e logs/%x_%j.err
+# Absolute chdir + stdout/stderr: relative logs/ breaks when submit CWD is Slurm spool
+# (/cm/local/.../var/spool/job<JOBID>/ → mkdir .../logs permission denied).
+#SBATCH --chdir=/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA
+#SBATCH -o /lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA/logs/%x_%j.out
+#SBATCH -e /lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA/logs/%x_%j.err
 
 set -euo pipefail
 
@@ -19,8 +22,8 @@ set -euo pipefail
 # Arg1 SEG — chain segment index (1..MAX_SEG). Passed through by sbatch requeue; no state files / folders.
 #
 # Usage:
-#   sbatch longrun.sbatch
-#   sbatch longrun.sbatch 1
+#   sbatch longrun_dfm.sbatch
+#   sbatch longrun_dfm.sbatch 1
 #
 # Parallel chains: use distinct --job-name so singleton does not block each other.
 #
@@ -28,8 +31,15 @@ set -euo pipefail
 # HF cache: scripts/train_dfm.sh redirects HF_HOME to REPO/.hf_cache (not home_cache).
 #           Set DFM_USE_SHARED_HF_CACHE=1 before sbatch to keep cache_env.sh HF paths.
 
-DFM_ROOT="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Programs/zk/VLA-DFM/DiscreteDiffusionVLA"
-LONGRUN_SBATCH="${LONGRUN_SBATCH:-${DFM_ROOT}/longrun.sbatch}"
+# Slurm: batch file lives in spool, so dirname(BASH_SOURCE) is wrong. #SBATCH --chdir
+# already ran — PWD is the repo. Local bash: use this script's directory.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    DFM_ROOT="${DFM_ROOT:-${PWD}}"
+else
+    DFM_ROOT="${DFM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}"
+fi
+# Chain must re-submit this file on the shared FS (default was wrong: longrun.sbatch does not exist).
+LONGRUN_SBATCH="${LONGRUN_SBATCH:-${DFM_ROOT}/longrun_dfm.sbatch}"
 CONDA_SH="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/Apps/miniforge3/etc/profile.d/conda.sh"
 CACHE_ENV="/lustre/fsw/portfolios/nvr/projects/nvr_lpr_llm/users/jiankais/cache_env.sh"
 CONDA_ENV="${CONDA_ENV:-dfm-vla}"
@@ -37,10 +47,10 @@ NGPU=8
 MAX_SEG="${MAX_SEG:-25}"
 SEG="${1:-1}"
 
-mkdir -p logs
+mkdir -p "${DFM_ROOT}/logs"
 
 if ! [[ "${SEG}" =~ ^[0-9]+$ ]] || [[ "${SEG}" -lt 1 ]]; then
-    echo "Invalid SEG='${SEG}' (need positive integer). Usage: sbatch longrun.sbatch [SEG]" >&2
+    echo "Invalid SEG='${SEG}' (need positive integer). Usage: sbatch longrun_dfm.sbatch [SEG]" >&2
     exit 1
 fi
 
@@ -61,7 +71,13 @@ echo "========================="
 ############################
 if [[ "${SEG}" -lt "${MAX_SEG}" ]]; then
     echo "Scheduling follow-up: SEG=$((SEG + 1)) / MAX_SEG=${MAX_SEG}"
-    sbatch --dependency=singleton --job-name="${SLURM_JOB_NAME:-dfm_longrun}" "${LONGRUN_SBATCH}" "$((SEG + 1))"
+    sbatch \
+        --dependency=singleton \
+        --job-name="${SLURM_JOB_NAME:-dfm_longrun}" \
+        -D "${DFM_ROOT}" \
+        -o "${DFM_ROOT}/logs/%x_%j.out" \
+        -e "${DFM_ROOT}/logs/%x_%j.err" \
+        "${LONGRUN_SBATCH}" "$((SEG + 1))"
 fi
 
 SRUN_PID=""
