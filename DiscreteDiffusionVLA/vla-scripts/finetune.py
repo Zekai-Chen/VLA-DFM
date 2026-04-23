@@ -71,6 +71,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 class FinetuneConfig:
     # fmt: off
     vla_path: str = "openvla/openvla-7b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
+    # When resuming with --resume, set `vla_path` to the run checkpoint dir (e.g. ...-35000_chkpt). If that dir only
+    # contains lora_adapter/ and head *.pt (merge failed or merge disabled), set this to the full *base* OpenVLA
+    # snapshot (local path or Hub id) so we can load weights; otherwise from_pretrained on vla_path fails.
+    pretrained_vla_path: Optional[str] = None
 
     # Dataset
     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
@@ -334,6 +338,17 @@ def get_run_id(cfg) -> str:
         if cfg.run_id_note is not None:
             run_id += f"--{cfg.run_id_note}"
     return run_id
+
+
+def checkpoint_dir_has_merge_weights(ckpt_dir: Path) -> bool:
+    """True if ckpt_dir contains weights loadable as a full HF model (single-file or sharded)."""
+    if (ckpt_dir / "model.safetensors").exists() or (ckpt_dir / "pytorch_model.bin").exists():
+        return True
+    if (ckpt_dir / "model.safetensors.index.json").exists():
+        return True
+    if (ckpt_dir / "pytorch_model.bin.index.json").exists():
+        return True
+    return False
 
 
 def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu") -> dict:
@@ -894,23 +909,26 @@ def save_training_checkpoint(
     # Merge LoRA weights into base model and save resulting model checkpoint
     # Note: Can be very slow on some devices; if so, we recommend merging offline
     if cfg.use_lora and cfg.merge_lora_during_training:
-        base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path,
-            config=vla.module.config,
-            torch_dtype=resolve_torch_dtype(cfg.torch_dtype),
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-        )
-        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-        merged_vla = merged_vla.merge_and_unload()
-
+        # Merging a second 7B model on the same GPU(s) while training is loaded causes OOM. Only run on
+        # rank-0, on CPU, after other ranks (which hold no merge state) have hit the barrier above.
+        base_id = cfg.pretrained_vla_path or cfg.vla_path
         if distributed_state.is_main_process:
+            base_vla = AutoModelForVision2Seq.from_pretrained(
+                base_id,
+                config=vla.module.config,
+                torch_dtype=resolve_torch_dtype(cfg.torch_dtype),
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+            )
+            base_vla = base_vla.to("cpu")
+            merged_vla = PeftModel.from_pretrained(base_vla, str(adapter_dir))
+            merged_vla = merged_vla.to("cpu")
+            merged_vla = merged_vla.merge_and_unload()
             merged_vla.config = vla.module.config
             merged_vla.save_pretrained(checkpoint_dir)
             vla.module.config.save_pretrained(checkpoint_dir)
             print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
-
-        # Wait for merged model to be saved
+            del merged_vla, base_vla
         dist.barrier()
 
 
@@ -1045,6 +1063,27 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
+    if cfg.pretrained_vla_path:
+        cfg.pretrained_vla_path = cfg.pretrained_vla_path.rstrip("/")
+    if cfg.resume and cfg.pretrained_vla_path and model_is_on_hf_hub(cfg.pretrained_vla_path):
+        cfg.pretrained_vla_path = snapshot_download(repo_id=cfg.pretrained_vla_path)
+    if cfg.resume and cfg.pretrained_vla_path and not (Path(cfg.vla_path) / "lora_adapter").exists():
+        raise ValueError(
+            f"When using --pretrained_vla_path, expected {Path(cfg.vla_path) / 'lora_adapter'} to exist."
+        )
+    if (
+        cfg.resume
+        and cfg.use_lora
+        and not cfg.pretrained_vla_path
+        and (Path(cfg.vla_path) / "lora_adapter").exists()
+    ):
+        if not checkpoint_dir_has_merge_weights(Path(cfg.vla_path)):
+            raise ValueError(
+                "Resume path has lora_adapter/ but no merged HF weights (expected model.safetensors, "
+                "pytorch_model.bin, or sharded *.index.json + model-*-of-*.safetensors). "
+                "Pass --pretrained_vla_path to your full base OpenVLA directory (or Hub id) so base weights and the "
+                "adapter can be loaded together."
+            )
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
 
     # Get experiment run ID
@@ -1184,8 +1223,11 @@ def finetune(cfg: FinetuneConfig) -> None:
                 f"pad_id={action_range.pad_token_id} vocab_size={action_range.vocab_size}"
             )
 
+    vla_weights_path = (
+        cfg.pretrained_vla_path if (cfg.resume and cfg.pretrained_vla_path) else cfg.vla_path
+    )
     vla = AutoModelForVision2Seq.from_pretrained(
-        cfg.vla_path,
+        vla_weights_path,
         config=model_config,  # Pass the updated config
         torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
@@ -1201,19 +1243,25 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # LoRA setup
     if cfg.use_lora:
-        lora_kwargs = {}
-        if cfg.use_discrete_flow_matching:
-            # Ensure mask/pad embeddings are trainable and saved in the adapter for DFM
-            lora_kwargs["modules_to_save"] = ["embed_tokens", "lm_head"]
-        lora_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
-            lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
-            init_lora_weights="gaussian",
-            **lora_kwargs,
-        )
-        vla = get_peft_model(vla, lora_config)
+        if cfg.resume and cfg.pretrained_vla_path:
+            vla = PeftModel.from_pretrained(
+                vla,
+                str(Path(cfg.vla_path) / "lora_adapter"),
+            )
+        else:
+            lora_kwargs = {}
+            if cfg.use_discrete_flow_matching:
+                # Ensure mask/pad embeddings are trainable and saved in the adapter for DFM
+                lora_kwargs["modules_to_save"] = ["embed_tokens", "lm_head"]
+            lora_config = LoraConfig(
+                r=cfg.lora_rank,
+                lora_alpha=min(cfg.lora_rank, 16),
+                lora_dropout=cfg.lora_dropout,
+                target_modules="all-linear",
+                init_lora_weights="gaussian",
+                **lora_kwargs,
+            )
+            vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
 
     # FiLM setup
