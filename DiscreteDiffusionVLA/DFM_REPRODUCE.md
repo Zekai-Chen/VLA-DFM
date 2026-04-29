@@ -120,6 +120,49 @@ bash scripts/train_dfm.sh --resume
 bash scripts/train_dfm.sh --resume ~/checkpoints/dfm-vla-320k/<run_dir>/checkpoint-7000
 ```
 
+### Training on other LIBERO suites (Spatial / Goal / Long)
+
+The DDVLA paper reports results on all 4 LIBERO suites (Spatial, Object, Goal, Long).
+Each suite needs a separately trained checkpoint — same training config, different
+dataset and run directory. Override via env vars (no script changes needed):
+
+```bash
+# LIBERO-Spatial
+DATASET_NAME=libero_spatial_no_noops \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-spatial-320k \
+bash scripts/train_dfm.sh
+
+# LIBERO-Goal
+DATASET_NAME=libero_goal_no_noops \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-goal-320k \
+bash scripts/train_dfm.sh
+
+# LIBERO-Long (a.k.a. libero_10)
+DATASET_NAME=libero_10_no_noops \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-long-320k \
+bash scripts/train_dfm.sh
+```
+
+Resume each one independently:
+
+```bash
+DATASET_NAME=libero_spatial_no_noops \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-spatial-320k \
+bash scripts/train_dfm.sh --resume
+```
+
+Verify the datasets are present before launching:
+
+```bash
+ls $HOME/data/RLDS/modified_libero_rlds/ | grep -E "spatial|goal|libero_10|object"
+# expected: libero_spatial_no_noops, libero_goal_no_noops, libero_10_no_noops, libero_object_no_noops
+```
+
+> **Note**: Each suite is a 320k-step training run (~6 days on 8×A100-80GB).
+> The 4 suites are independent — train them in parallel on separate machines if available.
+> All eval commands and `eval_ddvla.sh` work the same way; just point to the matching
+> checkpoint and pass `--task_suite_name libero_spatial / libero_goal / libero_10 / libero_object`.
+
 ### Training configuration
 
 The script `scripts/train_dfm.sh` runs with these parameters:
