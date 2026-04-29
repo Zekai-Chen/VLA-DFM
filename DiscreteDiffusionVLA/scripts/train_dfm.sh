@@ -44,7 +44,7 @@ NPROC="${NPROC:-$(nvidia-smi -L | wc -l)}"
 BATCH_SIZE=8
 LR=5e-4
 MAX_STEPS=320000
-SAVE_FREQ=7000          # ~3h per checkpoint on 8xA100
+SAVE_FREQ=8000          # divides 320000 evenly so the final checkpoint is saved
 DECAY_START=100000
 LORA_RANK=32
 
