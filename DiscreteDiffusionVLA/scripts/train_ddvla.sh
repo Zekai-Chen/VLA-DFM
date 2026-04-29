@@ -35,7 +35,7 @@ NPROC="${NPROC:-$(nvidia-smi -L | wc -l)}"
 # ── Training params ────────────────────────────────────────────────
 BATCH_SIZE=8
 LR=5e-4
-MAX_STEPS=320000
+MAX_STEPS=320001
 SAVE_FREQ=8000          # divides 320000 evenly so the final checkpoint is saved
 DECAY_START=100000
 LORA_RANK=32
