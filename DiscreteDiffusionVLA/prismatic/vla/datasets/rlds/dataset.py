@@ -307,6 +307,11 @@ def apply_trajectory_transforms(
     if max_proprio is not None and "proprio" in dataset.element_spec["observation"]:
         dataset = dataset.filter(lambda x: tf.math.reduce_all(tf.math.abs(x["observation"]["proprio"]) <= max_proprio))
 
+    # filter out trajectories shorter than the action chunk window (would crash chunk_act_obs)
+    if future_action_window_size > 0:
+        min_traj_len = future_action_window_size + 1
+        dataset = dataset.filter(lambda x: tf.shape(x["action"])[0] >= min_traj_len)
+
     # marks which entires of the observation and task dicts are padding
     dataset = dataset.traj_map(traj_transforms.add_pad_mask_dict, num_parallel_calls)
 
