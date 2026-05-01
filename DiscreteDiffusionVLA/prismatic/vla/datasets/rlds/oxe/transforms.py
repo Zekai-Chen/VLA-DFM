@@ -67,7 +67,7 @@ def bridge_orig_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     for key in trajectory.keys():
         if key == "traj_metadata":
             continue
-        elif isinstance(trajectory[key], dict):
+        elif key == "observation":
             for key2 in trajectory[key]:
                 trajectory[key][key2] = trajectory[key][key2][1:]
         else:

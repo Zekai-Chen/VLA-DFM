@@ -38,14 +38,14 @@ ALOHA_CONSTANTS = {
 }
 
 BRIDGE_CONSTANTS = {
-    "NUM_ACTIONS_CHUNK": 5,
+    "NUM_ACTIONS_CHUNK": 3,  # SimplerEnv-Bridge: chunk=3 per concurrent DDVLA paper (Sec 4.2)
     "ACTION_DIM": 7,
     "PROPRIO_DIM": 7,
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
 GOOGLE_ROBOT_CONSTANTS = {
-    "NUM_ACTIONS_CHUNK": 5,
+    "NUM_ACTIONS_CHUNK": 8,  # SimplerEnv-Fractal: chunk=8 per concurrent DDVLA paper (Sec 4.2)
     "ACTION_DIM": 7,
     "PROPRIO_DIM": 8,  # base_pose_tool_reached (xyz + quat = 7) + gripper_closed (1) = 8
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,

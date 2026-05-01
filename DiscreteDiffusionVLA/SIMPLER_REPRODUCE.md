@@ -5,7 +5,7 @@ two embodiment branches:
 
 | Branch | Training data | Eval task suite |
 |--------|--------------|-----------------|
-| **WidowX** | Bridge V2 (`bridge_orig`, ~60k traj) | `widowx_*` tasks (stack_cube, carrot_on_plate, spoon_on_tablecloth, eggplant_in_basket) |
+| **WidowX** | Bridge V2 (`bridge_oxe`, ~60k traj) | `widowx_*` tasks (stack_cube, carrot_on_plate, spoon_on_tablecloth, eggplant_in_basket) |
 | **Google Robot** | Fractal / RT-1 (`fractal20220817_data`, ~130k traj) | `google_robot_*` tasks (pick_coke_can, move_near, open_drawer, etc.) |
 
 Each requires a **separate** 320k-step training run. Same env / repo / install
@@ -23,7 +23,7 @@ Both datasets are RLDS format from Open-X-Embodiment.
 ```bash
 # Bridge V2 (WidowX, ~600 GB)
 gsutil -m cp -r gs://gresearch/robotics/bridge/0.1.0 \
-    $REPO_ROOT/data/RLDS/bridge_orig/
+    $REPO_ROOT/data/RLDS/bridge_oxe/
 
 # Fractal / RT-1 (Google Robot, ~110 GB)
 gsutil -m cp -r gs://gresearch/robotics/fractal20220817_data/0.1.0 \
@@ -35,7 +35,7 @@ If `gsutil` is unavailable, both are also on Hugging Face (`openvla/modified_lib
 Verify after download:
 
 ```bash
-ls $REPO_ROOT/data/RLDS/bridge_orig/0.1.0/ | head
+ls $REPO_ROOT/data/RLDS/bridge_oxe/0.1.0/ | head
 ls $REPO_ROOT/data/RLDS/fractal20220817_data/0.1.0/ | head
 ```
 
@@ -46,11 +46,11 @@ detector picks the right set from CLI args (`bridge` → BRIDGE, `fractal`/`goog
 
 | Embodiment | NUM_ACTIONS_CHUNK | ACTION_DIM | PROPRIO_DIM | Norm |
 |-----------|-------------------|------------|-------------|------|
-| Bridge V2 (WidowX) | 5 | 7 | 7 (EEF xyz+euler + gripper) | bounds_q99 |
-| Fractal (Google Robot) | 5 | 7 | 8 (base_pose_tool_reached + gripper_closed) | bounds_q99 |
+| Bridge V2 (WidowX) | **3** | 7 | 7 | bounds_q99 |
+| Fractal (Google Robot) | **8** | 7 | 8 | bounds_q99 |
 
-**Note**: `NUM_ACTIONS_CHUNK=5` for both (vs 8 for LIBERO) — these datasets are
-single-step OXE format; chunked decoding still works at eval time.
+**Chunk sizes match the concurrent Discrete Diffusion VLA paper (Sec 4.2)**:
+LIBERO=8, Fractal=8, Bridge=3.
 
 ## 4. Training
 
@@ -61,7 +61,7 @@ from the latest `*_chkpt` directory.
 ### Bridge V2 (WidowX)
 
 ```bash
-DATASET_NAME=bridge_orig \
+DATASET_NAME=bridge_oxe \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
 NUM_IMAGES_IN_INPUT=1 \
 bash scripts/train_dfm_simpler.sh --resume
@@ -81,7 +81,7 @@ bash scripts/train_dfm_simpler.sh --resume
 | Param | LIBERO | SimplerEnv (Bridge / Fractal) |
 |-------|--------|-------------------------------|
 | `--num_images_in_input` | 2 (agentview + wrist) | **1** (single primary camera) |
-| `--dataset_name` | `libero_object_no_noops` etc. | `bridge_orig` / `fractal20220817_data` |
+| `--dataset_name` | `libero_object_no_noops` etc. | `bridge_oxe` / `fractal20220817_data` |
 | Embodiment constants | LIBERO_CONSTANTS | BRIDGE_CONSTANTS / GOOGLE_ROBOT_CONSTANTS |
 
 All other hyperparameters match `train_dfm.sh`: 320k steps, batch 64,
@@ -102,7 +102,7 @@ LIBERO eval.
 # Start server (terminal 1)
 python experiments/robot/vla_eval_adapter/vla_dfm_server.py \
     --pretrained_checkpoint $HOME/checkpoints/dfm-vla-bridge-320k/<run_dir>/<step>_chkpt \
-    --unnorm_key bridge_orig \
+    --unnorm_key bridge_oxe \
     --use_discrete_flow_matching \
     --dfm_decode_mode ctmc \
     --num_images_in_input 1 \
