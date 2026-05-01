@@ -18,17 +18,18 @@ Same conda env as `DFM_REPRODUCE.md`.
 
 ## 2. Download dataset
 
+Install `gsutil` first if missing: `pip install gsutil` (no sudo) or
+`sudo snap install google-cloud-cli`.
+
 ```bash
-# ManiSkill2 OXE version (~30 GB)
+# ManiSkill2 OXE version (~150 GB; create the destination first or gsutil errors)
+mkdir -p $REPO_ROOT/data/RLDS/maniskill_dataset_converted_externally_to_rlds
 gsutil -m cp -r gs://gresearch/robotics/maniskill_dataset_converted_externally_to_rlds/0.1.0 \
     $REPO_ROOT/data/RLDS/maniskill_dataset_converted_externally_to_rlds/
 
 # Verify
 ls $REPO_ROOT/data/RLDS/maniskill_dataset_converted_externally_to_rlds/0.1.0/ | head
 ```
-
-Install `gsutil` first if missing: `pip install gsutil` (no sudo) or
-`sudo snap install google-cloud-cli`.
 
 ## 3. Embodiment constants
 
