@@ -18,22 +18,50 @@ Same conda env as `DFM_REPRODUCE.md`. No extra installs needed.
 
 ## 2. Download dataset
 
-CALVIN data uses a community-uploaded RLDS conversion on Hugging Face
-(`zhouhongyi/calvin_abc_rlds`, ~80 GB, 549 TFRecord shards).
+CALVIN data is the **ABC→D split** (paper-standard, harder than ABCD→D),
+hosted as a community RLDS conversion on Hugging Face
+(`zhouhongyi/calvin_abc_rlds`, ~80 GB, 512 train + 32 validation shards).
+
+> **Use `git clone` (LFS), not `huggingface-cli download`** — the HF CLI
+> repeatedly fails with 416 Range errors on a couple of shards.
 
 ```bash
-mkdir -p $REPO_ROOT/data/RLDS/calvin_abc_rlds
-huggingface-cli download zhouhongyi/calvin_abc_rlds \
-    --repo-type dataset \
-    --local-dir $REPO_ROOT/data/RLDS/calvin_abc_rlds
+sudo apt-get install -y git-lfs && git lfs install   # if not already installed
+cd $REPO_ROOT/data/RLDS
+git clone https://huggingface.co/datasets/zhouhongyi/calvin_abc_rlds
 ```
 
-Verify after download:
+After clone, **reorganize to TFDS layout** (`<dataset>/<version>/...`):
 
 ```bash
-ls $REPO_ROOT/data/RLDS/calvin_abc_rlds/ | grep -E "features.json|dataset_info.json"
-ls $REPO_ROOT/data/RLDS/calvin_abc_rlds/ | grep "tfrecord" | wc -l   # expect 512
+cd $REPO_ROOT/data/RLDS/calvin_abc_rlds
+mkdir -p 1.0.0
+mv calvin_abc-train.tfrecord-* calvin_abc-validation.tfrecord-* \
+   features.json dataset_info.json 1.0.0/
 ```
+
+Verify:
+
+```bash
+ls 1.0.0/calvin_abc-train.tfrecord-*      | wc -l   # expect 512
+ls 1.0.0/calvin_abc-validation.tfrecord-* | wc -l   # expect 32
+ls 1.0.0/features.json 1.0.0/dataset_info.json
+```
+
+If git clone misses a couple shards (HF CDN occasionally serves bad bytes for
+certain files), patch them directly:
+
+```bash
+cd $REPO_ROOT/data/RLDS/calvin_abc_rlds/1.0.0
+for f in 00100 00101; do
+  [ -f calvin_abc-train.tfrecord-${f}-of-00512 ] || \
+    wget -q "https://huggingface.co/datasets/zhouhongyi/calvin_abc_rlds/resolve/main/calvin_abc-train.tfrecord-${f}-of-00512" \
+         -O calvin_abc-train.tfrecord-${f}-of-00512
+done
+```
+
+(After download, you can `rm -rf $REPO_ROOT/data/RLDS/calvin_abc_rlds/.git` to
+reclaim ~30 GB of git-lfs object storage that's no longer needed.)
 
 > **Reliability check**: After the first epoch, inspect
 > `$RUN_ROOT/<run_dir>/dataset_statistics.json` and verify `action.min` / `action.max`
