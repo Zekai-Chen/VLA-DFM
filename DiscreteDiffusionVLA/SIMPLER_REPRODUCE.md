@@ -54,16 +54,24 @@ LIBERO=8, Fractal=8, Bridge=3.
 
 ## 4. Training
 
-**Use `--resume` from day one — same command for fresh start and resume.**
-If `RUN_ROOT` is empty, it starts fresh; if a checkpoint exists, it auto-resumes
-from the latest `*_chkpt` directory.
+**Config matches the concurrent Discrete Diffusion VLA paper (ICLR 2026 sub. #6223, Appendix C):**
+- **100k steps** (vs 150k–300k for LIBERO)
+- **Batch size 32 total** (paper used 4×A800)
+- Bridge uses **FiLM** for stronger language grounding on WidowX manipulation; Fractal does not.
 
-### Bridge V2 (WidowX)
+**Use `--resume` from day one — same command works for fresh start and resume.**
+
+### Bridge V2 (WidowX) — with FiLM
 
 ```bash
 DATASET_NAME=bridge_oxe \
-RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-100k \
 NUM_IMAGES_IN_INPUT=1 \
+BATCH_SIZE=8 \
+MAX_STEPS=100001 \
+SAVE_FREQ=10000 \
+DECAY_START=50000 \
+USE_FILM=True \
 bash scripts/train_dfm_simpler.sh --resume
 ```
 
@@ -71,10 +79,18 @@ bash scripts/train_dfm_simpler.sh --resume
 
 ```bash
 DATASET_NAME=fractal20220817_data \
-RUN_ROOT=$HOME/checkpoints/dfm-vla-fractal-320k \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-fractal-100k \
 NUM_IMAGES_IN_INPUT=1 \
+BATCH_SIZE=8 \
+MAX_STEPS=100001 \
+SAVE_FREQ=10000 \
+DECAY_START=50000 \
 bash scripts/train_dfm_simpler.sh --resume
 ```
+
+> **Note**: With `BATCH_SIZE=8` per GPU on 4 GPUs → total batch 32 (paper config).
+> If you have 8 GPUs, use `BATCH_SIZE=4` to keep total batch = 32.
+> Estimated wall-clock: ~2 days on 4×A100-80GB at 100k steps.
 
 ### Key differences vs LIBERO training
 

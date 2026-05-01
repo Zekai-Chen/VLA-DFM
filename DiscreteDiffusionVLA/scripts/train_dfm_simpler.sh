@@ -35,6 +35,7 @@ RUN_ROOT="${RUN_ROOT:?RUN_ROOT required}"
 
 # ── Embodiment-specific defaults (SimplerEnv: single primary camera, no wrist) ─
 NUM_IMAGES_IN_INPUT="${NUM_IMAGES_IN_INPUT:-1}"
+USE_FILM="${USE_FILM:-False}"  # Bridge benefits from FiLM (per concurrent DDVLA paper)
 
 # ── Hardware ───────────────────────────────────────────────────────
 NPROC="${NPROC:-$(nvidia-smi -L | wc -l)}"
@@ -101,7 +102,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node "$NPROC" vla-scripts/finetune.
     --use_discrete_flow_matching True \
     --use_l1_regression False \
     --use_diffusion False \
-    --use_film False \
+    --use_film $USE_FILM \
     --num_images_in_input "$NUM_IMAGES_IN_INPUT" \
     --use_proprio True \
     --batch_size $BATCH_SIZE \
