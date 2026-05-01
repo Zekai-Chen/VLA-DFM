@@ -58,6 +58,13 @@ MANISKILL_CONSTANTS = {
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
+CALVIN_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 8,  # CALVIN simulator runs at 30Hz, 8 chunks ~= 0.27s
+    "ACTION_DIM": 7,         # delta xyz (3) + delta euler (3) + gripper (1)
+    "PROPRIO_DIM": 15,       # CALVIN full state: ee_pos(3) + ee_orn(3) + ee_grip(1) + joints(7) + gripper_action(1)
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
+
 
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
@@ -71,6 +78,8 @@ def detect_robot_platform():
         return "GOOGLE_ROBOT"
     elif "maniskill" in cmd_args:
         return "MANISKILL"
+    elif "calvin" in cmd_args:
+        return "CALVIN"
     elif "bridge" in cmd_args:
         return "BRIDGE"
     else:
@@ -89,6 +98,8 @@ elif ROBOT_PLATFORM == "GOOGLE_ROBOT":
     constants = GOOGLE_ROBOT_CONSTANTS
 elif ROBOT_PLATFORM == "MANISKILL":
     constants = MANISKILL_CONSTANTS
+elif ROBOT_PLATFORM == "CALVIN":
+    constants = CALVIN_CONSTANTS
 
 # Assign constants to global variables
 NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]

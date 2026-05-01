@@ -27,13 +27,15 @@ sudo snap install google-cloud-cli   # or: sudo apt install gsutil
 pip install gsutil
 ```
 
-Then download:
+Then download (**create the destination directory first or `gsutil` errors out**):
 ```bash
 # Bridge V2 (WidowX, ~390 GB)
+mkdir -p $REPO_ROOT/data/RLDS/bridge_oxe
 gsutil -m cp -r gs://gresearch/robotics/bridge/0.1.0 \
     $REPO_ROOT/data/RLDS/bridge_oxe/
 
 # Fractal / RT-1 (Google Robot, ~110 GB)
+mkdir -p $REPO_ROOT/data/RLDS/fractal20220817_data
 gsutil -m cp -r gs://gresearch/robotics/fractal20220817_data/0.1.0 \
     $REPO_ROOT/data/RLDS/fractal20220817_data/
 ```

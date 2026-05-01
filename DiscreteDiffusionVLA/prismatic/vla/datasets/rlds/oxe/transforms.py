@@ -417,6 +417,22 @@ def maniskill_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def calvin_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """CALVIN ABC->D RLDS (zhouhongyi/calvin_abc_rlds).
+
+    The conversion already produces the standard RLDS layout we need:
+      - action: 7-dim (delta xyz, delta euler, gripper); gripper is the last channel
+      - observation.state: 15-dim full proprio
+      - observation.rgb_static (200x200), observation.rgb_gripper (84x84)
+      - language_instruction at the steps level
+
+    No reshaping is needed; only normalize the gripper channel to a {-1, +1} convention
+    if the upstream conversion uses {0, 1}. The official CALVIN convention is already
+    {-1=close, +1=open}, so we pass through unchanged.
+    """
+    return trajectory
+
+
 def furniture_bench_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     import tensorflow_graphics.geometry.transformation as tft
 
@@ -872,6 +888,7 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "austin_buds_dataset_converted_externally_to_rlds": austin_buds_dataset_transform,
     "nyu_franka_play_dataset_converted_externally_to_rlds": nyu_franka_play_dataset_transform,
     "maniskill_dataset_converted_externally_to_rlds": maniskill_dataset_transform,
+    "calvin_abc_rlds": calvin_dataset_transform,
     "furniture_bench_dataset_converted_externally_to_rlds": furniture_bench_dataset_transform,
     "cmu_franka_exploration_dataset_converted_externally_to_rlds": cmu_franka_exploration_dataset_transform,
     "ucsd_kitchen_dataset_converted_externally_to_rlds": ucsd_kitchen_dataset_transform,
