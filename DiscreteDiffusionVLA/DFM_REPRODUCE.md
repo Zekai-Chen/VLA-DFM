@@ -124,30 +124,23 @@ bash scripts/train_dfm.sh --resume ~/checkpoints/dfm-vla-320k/<run_dir>/checkpoi
 
 The DDVLA paper reports results on all 4 LIBERO suites (Spatial, Object, Goal, Long).
 Each suite needs a separately trained checkpoint — same training config, different
-dataset and run directory. Override via env vars (no script changes needed):
+dataset and run directory. **Use `--resume` from day one — same command works for
+fresh start (no checkpoint → fresh) and resume (checkpoint exists → auto-resume).**
 
 ```bash
 # LIBERO-Spatial
 DATASET_NAME=libero_spatial_no_noops \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-spatial-320k \
-bash scripts/train_dfm.sh
+bash scripts/train_dfm.sh --resume
 
 # LIBERO-Goal
 DATASET_NAME=libero_goal_no_noops \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-goal-320k \
-bash scripts/train_dfm.sh
+bash scripts/train_dfm.sh --resume
 
 # LIBERO-Long (a.k.a. libero_10)
 DATASET_NAME=libero_10_no_noops \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-long-320k \
-bash scripts/train_dfm.sh
-```
-
-Resume each one independently:
-
-```bash
-DATASET_NAME=libero_spatial_no_noops \
-RUN_ROOT=$HOME/checkpoints/dfm-vla-spatial-320k \
 bash scripts/train_dfm.sh --resume
 ```
 

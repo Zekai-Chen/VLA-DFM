@@ -54,13 +54,17 @@ single-step OXE format; chunked decoding still works at eval time.
 
 ## 4. Training
 
+**Use `--resume` from day one — same command for fresh start and resume.**
+If `RUN_ROOT` is empty, it starts fresh; if a checkpoint exists, it auto-resumes
+from the latest `*_chkpt` directory.
+
 ### Bridge V2 (WidowX)
 
 ```bash
 DATASET_NAME=bridge_orig \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
 NUM_IMAGES_IN_INPUT=1 \
-bash scripts/train_dfm_simpler.sh
+bash scripts/train_dfm_simpler.sh --resume
 ```
 
 ### Fractal / RT-1 (Google Robot)
@@ -69,16 +73,6 @@ bash scripts/train_dfm_simpler.sh
 DATASET_NAME=fractal20220817_data \
 RUN_ROOT=$HOME/checkpoints/dfm-vla-fractal-320k \
 NUM_IMAGES_IN_INPUT=1 \
-bash scripts/train_dfm_simpler.sh
-```
-
-### Resume
-
-Same as LIBERO: append `--resume`. Auto-finds latest `_chkpt` in `RUN_ROOT`.
-
-```bash
-DATASET_NAME=bridge_orig \
-RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
 bash scripts/train_dfm_simpler.sh --resume
 ```
 
