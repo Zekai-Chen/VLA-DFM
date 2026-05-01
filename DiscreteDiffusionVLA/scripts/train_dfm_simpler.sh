@@ -40,12 +40,12 @@ NUM_IMAGES_IN_INPUT="${NUM_IMAGES_IN_INPUT:-1}"
 NPROC="${NPROC:-$(nvidia-smi -L | wc -l)}"
 
 # ── Training params (matching DDVLA paper scale) ───────────────────
-BATCH_SIZE=8
-LR=5e-4
-MAX_STEPS=320001
-SAVE_FREQ=8000
-DECAY_START=100000
-LORA_RANK=32
+BATCH_SIZE="${BATCH_SIZE:-8}"
+LR="${LR:-5e-4}"
+MAX_STEPS="${MAX_STEPS:-320001}"
+SAVE_FREQ="${SAVE_FREQ:-8000}"
+DECAY_START="${DECAY_START:-100000}"
+LORA_RANK="${LORA_RANK:-32}"
 
 # ── DFM-specific params ───────────────────────────────────────────
 DFM_SCHEDULE="cosine"
