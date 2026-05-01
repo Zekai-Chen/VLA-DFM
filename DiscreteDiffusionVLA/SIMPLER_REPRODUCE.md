@@ -8,9 +8,9 @@ two embodiment branches:
 | **WidowX** | Bridge V2 (`bridge_oxe`, ~60k traj) | `widowx_*` tasks (stack_cube, carrot_on_plate, spoon_on_tablecloth, eggplant_in_basket) |
 | **Google Robot** | Fractal / RT-1 (`fractal20220817_data`, ~130k traj) | `google_robot_*` tasks (pick_coke_can, move_near, open_drawer, etc.) |
 
-Each requires a **separate** 320k-step training run. Same env / repo / install
-as `DFM_REPRODUCE.md` — only the dataset and a few embodiment-specific constants
-change.
+Each requires a **separate** 100k-step training run (per concurrent DDVLA paper
+Appendix C). Same env / repo / install as `DFM_REPRODUCE.md` — only the dataset
+and a few embodiment-specific constants change.
 
 ## 1. Environment
 
@@ -100,14 +100,13 @@ bash scripts/train_dfm_simpler.sh --resume
 | `--dataset_name` | `libero_object_no_noops` etc. | `bridge_oxe` / `fractal20220817_data` |
 | Embodiment constants | LIBERO_CONSTANTS | BRIDGE_CONSTANTS / GOOGLE_ROBOT_CONSTANTS |
 
-All other hyperparameters match `train_dfm.sh`: 320k steps, batch 64,
-LoRA rank 32, cosine DFM schedule, t_max=0.7, generalized KL loss, legacy DFM
-vocab.
+All other hyperparameters match `train_dfm.sh`: LoRA rank 32, cosine DFM
+schedule, t_max=0.7, generalized KL loss, legacy DFM vocab.
 
 ### Expected training time
 
-Same as LIBERO: ~6 days on 8×A100-80GB per branch. The two branches can run
-in parallel on separate machines (~6 days total) or sequential (~12 days).
+~2 days per branch on 4×A100-80GB at 100k steps. Two branches in parallel
+on separate machines = 2 days total.
 
 ## 5. Evaluation
 
@@ -117,14 +116,14 @@ LIBERO eval.
 ```bash
 # Start server (terminal 1)
 python experiments/robot/vla_eval_adapter/vla_dfm_server.py \
-    --pretrained_checkpoint $HOME/checkpoints/dfm-vla-bridge-320k/<run_dir>/<step>_chkpt \
+    --pretrained_checkpoint $HOME/checkpoints/dfm-vla-bridge-100k/<run_dir>/<step>_chkpt \
     --unnorm_key bridge_oxe \
     --use_discrete_flow_matching \
     --dfm_decode_mode ctmc \
     --num_images_in_input 1 \
     --use_proprio \
     --center_crop \
-    --chunk_size 5 \
+    --chunk_size 3 \
     --port 8000
 
 # Run eval (terminal 2)
