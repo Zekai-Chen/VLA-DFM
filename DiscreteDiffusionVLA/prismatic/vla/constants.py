@@ -44,6 +44,13 @@ BRIDGE_CONSTANTS = {
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
+GOOGLE_ROBOT_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 5,
+    "ACTION_DIM": 7,
+    "PROPRIO_DIM": 8,  # base_pose_tool_reached (xyz + quat = 7) + gripper_closed (1) = 8
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
+
 
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
@@ -53,23 +60,24 @@ def detect_robot_platform():
         return "LIBERO"
     elif "aloha" in cmd_args:
         return "ALOHA"
+    elif "fractal" in cmd_args or "google_robot" in cmd_args or "rt_1" in cmd_args:
+        return "GOOGLE_ROBOT"
     elif "bridge" in cmd_args:
         return "BRIDGE"
     else:
-        # Default to LIBERO if unclear
         return "LIBERO"
 
 
-# Determine which robot platform to use
 ROBOT_PLATFORM = detect_robot_platform()
 
-# Set the appropriate constants based on the detected platform
 if ROBOT_PLATFORM == "LIBERO":
     constants = LIBERO_CONSTANTS
 elif ROBOT_PLATFORM == "ALOHA":
     constants = ALOHA_CONSTANTS
 elif ROBOT_PLATFORM == "BRIDGE":
     constants = BRIDGE_CONSTANTS
+elif ROBOT_PLATFORM == "GOOGLE_ROBOT":
+    constants = GOOGLE_ROBOT_CONSTANTS
 
 # Assign constants to global variables
 NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]

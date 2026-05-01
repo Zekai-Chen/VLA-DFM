@@ -1,0 +1,141 @@
+# Reproducing DFM-VLA on SimplerEnv (Bridge V2 + Fractal/RT-1)
+
+This guide trains DFM-VLA checkpoints for SimplerEnv evaluation. SimplerEnv has
+two embodiment branches:
+
+| Branch | Training data | Eval task suite |
+|--------|--------------|-----------------|
+| **WidowX** | Bridge V2 (`bridge_orig`, ~60k traj) | `widowx_*` tasks (stack_cube, carrot_on_plate, spoon_on_tablecloth, eggplant_in_basket) |
+| **Google Robot** | Fractal / RT-1 (`fractal20220817_data`, ~130k traj) | `google_robot_*` tasks (pick_coke_can, move_near, open_drawer, etc.) |
+
+Each requires a **separate** 320k-step training run. Same env / repo / install
+as `DFM_REPRODUCE.md` — only the dataset and a few embodiment-specific constants
+change.
+
+## 1. Environment
+
+Same conda env as LIBERO training. See `DFM_REPRODUCE.md` Section 1 for setup.
+
+## 2. Download datasets
+
+Both datasets are RLDS format from Open-X-Embodiment.
+
+```bash
+# Bridge V2 (WidowX, ~600 GB)
+gsutil -m cp -r gs://gresearch/robotics/bridge/0.1.0 \
+    $REPO_ROOT/data/RLDS/bridge_orig/
+
+# Fractal / RT-1 (Google Robot, ~110 GB)
+gsutil -m cp -r gs://gresearch/robotics/fractal20220817_data/0.1.0 \
+    $REPO_ROOT/data/RLDS/fractal20220817_data/
+```
+
+If `gsutil` is unavailable, both are also on Hugging Face (`openvla/modified_libero_rlds`-style mirrors exist for OXE datasets). Confirm the dataset directory matches the layout `<DATA_ROOT>/<dataset_name>/<version>/...`.
+
+Verify after download:
+
+```bash
+ls $REPO_ROOT/data/RLDS/bridge_orig/0.1.0/ | head
+ls $REPO_ROOT/data/RLDS/fractal20220817_data/0.1.0/ | head
+```
+
+## 3. Embodiment constants
+
+`prismatic/vla/constants.py` already includes both embodiments. The runtime
+detector picks the right set from CLI args (`bridge` → BRIDGE, `fractal`/`google_robot`/`rt_1` → GOOGLE_ROBOT).
+
+| Embodiment | NUM_ACTIONS_CHUNK | ACTION_DIM | PROPRIO_DIM | Norm |
+|-----------|-------------------|------------|-------------|------|
+| Bridge V2 (WidowX) | 5 | 7 | 7 (EEF xyz+euler + gripper) | bounds_q99 |
+| Fractal (Google Robot) | 5 | 7 | 8 (base_pose_tool_reached + gripper_closed) | bounds_q99 |
+
+**Note**: `NUM_ACTIONS_CHUNK=5` for both (vs 8 for LIBERO) — these datasets are
+single-step OXE format; chunked decoding still works at eval time.
+
+## 4. Training
+
+### Bridge V2 (WidowX)
+
+```bash
+DATASET_NAME=bridge_orig \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
+NUM_IMAGES_IN_INPUT=1 \
+bash scripts/train_dfm_simpler.sh
+```
+
+### Fractal / RT-1 (Google Robot)
+
+```bash
+DATASET_NAME=fractal20220817_data \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-fractal-320k \
+NUM_IMAGES_IN_INPUT=1 \
+bash scripts/train_dfm_simpler.sh
+```
+
+### Resume
+
+Same as LIBERO: append `--resume`. Auto-finds latest `_chkpt` in `RUN_ROOT`.
+
+```bash
+DATASET_NAME=bridge_orig \
+RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-320k \
+bash scripts/train_dfm_simpler.sh --resume
+```
+
+### Key differences vs LIBERO training
+
+| Param | LIBERO | SimplerEnv (Bridge / Fractal) |
+|-------|--------|-------------------------------|
+| `--num_images_in_input` | 2 (agentview + wrist) | **1** (single primary camera) |
+| `--dataset_name` | `libero_object_no_noops` etc. | `bridge_orig` / `fractal20220817_data` |
+| Embodiment constants | LIBERO_CONSTANTS | BRIDGE_CONSTANTS / GOOGLE_ROBOT_CONSTANTS |
+
+All other hyperparameters match `train_dfm.sh`: 320k steps, batch 64,
+LoRA rank 32, cosine DFM schedule, t_max=0.7, generalized KL loss, legacy DFM
+vocab.
+
+### Expected training time
+
+Same as LIBERO: ~6 days on 8×A100-80GB per branch. The two branches can run
+in parallel on separate machines (~6 days total) or sequential (~12 days).
+
+## 5. Evaluation
+
+Use the same `vla_eval_adapter/vla_dfm_server.py` infrastructure as for
+LIBERO eval.
+
+```bash
+# Start server (terminal 1)
+python experiments/robot/vla_eval_adapter/vla_dfm_server.py \
+    --pretrained_checkpoint $HOME/checkpoints/dfm-vla-bridge-320k/<run_dir>/<step>_chkpt \
+    --unnorm_key bridge_orig \
+    --use_discrete_flow_matching \
+    --dfm_decode_mode ctmc \
+    --num_images_in_input 1 \
+    --use_proprio \
+    --center_crop \
+    --chunk_size 5 \
+    --port 8000
+
+# Run eval (terminal 2)
+cd ~/vla-evaluation-harness
+vla-eval run --config configs/simpler_all_tasks.yaml --server-url ws://localhost:8000
+# (use simpler_google_robot_tasks.yaml for the Google Robot branch)
+```
+
+## 6. Implementation Notes
+
+**Action tokenizer bins**: The 256-bin action tokenizer was originally fitted on
+LIBERO action stats (99-percentile). When training on Bridge / Fractal, the bins
+need re-fitting on those datasets — finetune.py does this automatically via the
+RLDS dataset's stored statistics, but verify the `dataset_statistics.json`
+written into the `RUN_ROOT` matches your dataset.
+
+**Proprio dim mismatch**: If `PROPRIO_DIM` reported at startup doesn't match the
+embodiment (e.g. `BRIDGE` shows `PROPRIO_DIM=7` not `8`), either the detector
+mis-fired or the dataset key list in `oxe/configs.py` changed. Fix manually in
+`prismatic/vla/constants.py`.
+
+**Single camera**: SimplerEnv eval only provides one primary camera. Train with
+`NUM_IMAGES_IN_INPUT=1` to match — otherwise the model expects a wrist image
+that doesn't exist at eval time.
