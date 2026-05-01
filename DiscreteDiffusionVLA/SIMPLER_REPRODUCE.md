@@ -69,7 +69,7 @@ RUN_ROOT=$HOME/checkpoints/dfm-vla-bridge-100k \
 NUM_IMAGES_IN_INPUT=1 \
 BATCH_SIZE=8 \
 MAX_STEPS=100001 \
-SAVE_FREQ=10000 \
+SAVE_FREQ=5000 \
 DECAY_START=50000 \
 USE_FILM=True \
 bash scripts/train_dfm_simpler.sh --resume
@@ -83,7 +83,7 @@ RUN_ROOT=$HOME/checkpoints/dfm-vla-fractal-100k \
 NUM_IMAGES_IN_INPUT=1 \
 BATCH_SIZE=8 \
 MAX_STEPS=100001 \
-SAVE_FREQ=10000 \
+SAVE_FREQ=5000 \
 DECAY_START=50000 \
 bash scripts/train_dfm_simpler.sh --resume
 ```
@@ -91,6 +91,7 @@ bash scripts/train_dfm_simpler.sh --resume
 > **Note**: With `BATCH_SIZE=8` per GPU on 4 GPUs → total batch 32 (paper config).
 > If you have 8 GPUs, use `BATCH_SIZE=4` to keep total batch = 32.
 > Estimated wall-clock: ~2 days on 4×A100-80GB at 100k steps.
+> First checkpoint saves at step 5000 (~2-3 h); 20 checkpoints total (5000, 10000, …, 100000).
 
 ### Key differences vs LIBERO training
 
