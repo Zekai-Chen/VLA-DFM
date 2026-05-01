@@ -18,10 +18,18 @@ Same conda env as LIBERO training. See `DFM_REPRODUCE.md` Section 1 for setup.
 
 ## 2. Download datasets
 
-Both datasets are RLDS format from Open-X-Embodiment.
+Both datasets are RLDS format from Open-X-Embodiment, hosted on a public GCS bucket (no auth needed).
 
+Install `gsutil` first if missing:
 ```bash
-# Bridge V2 (WidowX, ~600 GB)
+sudo snap install google-cloud-cli   # or: sudo apt install gsutil
+# no-sudo alternative:
+pip install gsutil
+```
+
+Then download:
+```bash
+# Bridge V2 (WidowX, ~390 GB)
 gsutil -m cp -r gs://gresearch/robotics/bridge/0.1.0 \
     $REPO_ROOT/data/RLDS/bridge_oxe/
 
