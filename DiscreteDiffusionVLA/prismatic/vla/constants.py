@@ -51,6 +51,13 @@ GOOGLE_ROBOT_CONSTANTS = {
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
+MANISKILL_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 8,  # Franka Panda, same as LIBERO/Fractal
+    "ACTION_DIM": 7,
+    "PROPRIO_DIM": 8,  # tcp_pose (xyz + quat = 7) + gripper_state (1) = 8
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
+
 
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
@@ -62,6 +69,8 @@ def detect_robot_platform():
         return "ALOHA"
     elif "fractal" in cmd_args or "google_robot" in cmd_args or "rt_1" in cmd_args:
         return "GOOGLE_ROBOT"
+    elif "maniskill" in cmd_args:
+        return "MANISKILL"
     elif "bridge" in cmd_args:
         return "BRIDGE"
     else:
@@ -78,6 +87,8 @@ elif ROBOT_PLATFORM == "BRIDGE":
     constants = BRIDGE_CONSTANTS
 elif ROBOT_PLATFORM == "GOOGLE_ROBOT":
     constants = GOOGLE_ROBOT_CONSTANTS
+elif ROBOT_PLATFORM == "MANISKILL":
+    constants = MANISKILL_CONSTANTS
 
 # Assign constants to global variables
 NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]
