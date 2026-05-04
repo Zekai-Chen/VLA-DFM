@@ -209,6 +209,21 @@ class VLADFMModelServer(PredictModelServer):
         self._processor: Any = None
         self._cfg: SimpleNamespace | None = None
 
+    def get_observation_params(self) -> dict:
+        """Tell harness/benchmark which observation fields we need.
+
+        For SimplerEnv this controls whether `obs["states"]` (proprio) and the
+        wrist image get populated; without this we'd silently get only RGB and
+        the proprio_projector would receive zeros (= severe OOD for any model
+        trained with proprio).
+        """
+        params: dict = {}
+        if self.use_proprio:
+            params["send_state"] = True
+        if self.num_images_in_input > 1:
+            params["send_wrist_image"] = True
+        return params
+
     # ------------------------------------------------------------------
     # Lazy model loading
     # ------------------------------------------------------------------
@@ -272,6 +287,23 @@ class VLADFMModelServer(PredictModelServer):
         # Set multi-image mode (primary camera + optional wrist).
         vla.vision_backbone.set_num_images_in_input(self.num_images_in_input)
 
+        # FiLM: if a `vision_backbone--*_checkpoint.pt` lives next to the model,
+        # the model was trained with FiLM and the eval forward pass needs the
+        # same wrapped backbone (otherwise FiLM weights are silently ignored).
+        import glob
+        vb_glob = glob.glob(os.path.join(checkpoint, "vision_backbone--*_checkpoint.pt"))
+        film_checkpoint = vb_glob[0] if vb_glob else None
+        if film_checkpoint is not None:
+            from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
+            logger.info("Detected FiLM checkpoint at %s — wrapping vision backbone.", film_checkpoint)
+            vla.model.vision_backbone = FiLMedPrismaticVisionBackbone(
+                vision_backbone=vla.model.vision_backbone,
+                llm_dim=vla.llm_dim,
+            )
+            vla.model.vision_backbone.load_state_dict(torch.load(film_checkpoint, map_location="cpu"))
+            vla.model.vision_backbone = vla.model.vision_backbone.to(DEVICE)
+            vla.model.vision_backbone.set_num_images_in_input(self.num_images_in_input)
+
         self._vla = vla
         self._processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True)
 
@@ -289,6 +321,7 @@ class VLADFMModelServer(PredictModelServer):
             num_images_in_input=self.num_images_in_input,
             use_proprio=self.use_proprio,
             center_crop=self.center_crop,
+            use_film=film_checkpoint is not None,
             action_vocab_anchor=ckpt_anchor,
             legacy_eval_mode=bool(ckpt_legacy_train or ckpt_anchor == "legacy"),
         )
@@ -359,13 +392,29 @@ class VLADFMModelServer(PredictModelServer):
                 )
             dfm_obs["wrist_image"] = wrist_img
 
-        # Proprioception (use zero vector when benchmark doesn't provide state)
+        # Proprioception. Different benchmarks use different keys / formats:
+        #   LIBERO: obs["state"] (already in xyz+euler+gripper format, matches training)
+        #   SimplerEnv: obs["states"] (8D: pos3 + quat_wxyz4 + gripper1) — convert to 7D
         if self.use_proprio:
+            from prismatic.vla.constants import PROPRIO_DIM
+            state = None
             if "state" in obs:
-                dfm_obs["state"] = obs["state"]
-            else:
-                from prismatic.vla.constants import PROPRIO_DIM
-                dfm_obs["state"] = np.zeros(PROPRIO_DIM, dtype=np.float32)
+                state = np.asarray(obs["state"], dtype=np.float32)
+            elif "states" in obs:
+                s = np.asarray(obs["states"], dtype=np.float32).flatten()
+                if s.shape[0] == 8 and PROPRIO_DIM == 7:
+                    # SimplerEnv 8D -> Bridge/LIBERO 7D: pos(3) + quat_wxyz(4) + gripper(1) -> pos(3) + euler(3) + gripper(1)
+                    from scipy.spatial.transform import Rotation as R
+                    pos, quat_wxyz, grip = s[:3], s[3:7], s[7:8]
+                    quat_xyzw = quat_wxyz[[1, 2, 3, 0]]
+                    euler = R.from_quat(quat_xyzw).as_euler("xyz").astype(np.float32)
+                    state = np.concatenate([pos, euler, grip], axis=0)
+                else:
+                    state = s
+            if state is None:
+                logger.warning("No proprio in obs (keys=%s); falling back to zeros.", list(obs.keys()))
+                state = np.zeros(PROPRIO_DIM, dtype=np.float32)
+            dfm_obs["state"] = state
 
         task_label: str = obs.get("task_description", "")
 
